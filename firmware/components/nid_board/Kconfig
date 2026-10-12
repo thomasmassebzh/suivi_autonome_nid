@@ -1,0 +1,227 @@
+menu "Suivi nid — Carte et brochage"
+
+    comment "Valeurs par défaut : ESP32-P4X-Function-EV-Board (connecteur J1). -1 = non câblé."
+
+    config NID_PIN_PIR
+        int "GPIO sortie du détecteur PIR (LP GPIO 0-15, réveil de veille profonde)"
+        range 0 15
+        default 4
+        help
+            Sortie du HC-SR501 (ou du PIR Panasonic EKMB). Doit être une broche
+            basse consommation (GPIO 0 à 15) pour réveiller l'ESP32-P4 par EXT1.
+            À éviter sur la P4X : GPIO 0-1 (quartz 32 kHz), 7-8 (I2C).
+
+    config NID_PIR_ACTIVE_HIGH
+        bool "Sortie PIR active à l'état haut"
+        default y
+
+    config NID_PIN_BUTTON
+        int "GPIO bouton de mise en service (LP GPIO 0-15, actif bas ; -1 = aucun)"
+        range -1 15
+        default 5
+        help
+            Bouton vers la masse (pull-up interne). Un appui réveille le système
+            et ouvre le mode installation (Wi-Fi + aperçu).
+
+    config NID_PIN_RTC_INT
+        int "GPIO sortie INT/SQW du DS3231 (LP GPIO 0-15 ; -1 = non câblée)"
+        range -1 15
+        default -1
+        help
+            Optionnel en veille profonde (le réveil minuterie de l'ESP32-P4 suffit).
+            Dans l'architecture « coupure matérielle », la sortie INT commande
+            l'interrupteur d'alimentation et n'a pas besoin d'être reliée ici.
+
+    config NID_PIN_STATUS_LED
+        int "GPIO voyant d'état (allumé uniquement en installation ; -1 = aucun)"
+        range -1 54
+        default 46
+
+    config NID_STATUS_LED_ACTIVE_HIGH
+        bool "Voyant d'état actif à l'état haut"
+        default y
+
+    config NID_PIN_IR_LED
+        int "GPIO commande du MOSFET des LED IR 940 nm (-1 = aucune)"
+        range -1 54
+        default 32
+
+    config NID_IR_LED_PWM_FREQ_HZ
+        int "Fréquence PWM des LED IR (Hz)"
+        range 100 40000
+        default 20000
+        help
+            20 kHz : inaudible (FC1.2) et sans scintillement visible par la caméra.
+
+    choice NID_IRCUT_DRIVE
+        prompt "Commande du filtre IR-cut"
+        default NID_IRCUT_NONE
+        help
+            Dépend du module caméra (point ouvert pour la caméra Waveshare RPi
+            IR-CUT : photorésistance seule ou broche de commande). Si le filtre
+            bascule seul, choisir « aucune ».
+
+        config NID_IRCUT_NONE
+            bool "Aucune (filtre automatique du module, ou pas de filtre)"
+        config NID_IRCUT_LEVEL
+            bool "Un fil : niveau logique permanent"
+        config NID_IRCUT_PULSE
+            bool "Deux fils : impulsion via pont en H (filtre bistable)"
+    endchoice
+
+    config NID_PIN_IRCUT_A
+        int "GPIO IR-cut A (ou fil unique)"
+        range -1 54
+        default 33
+        depends on !NID_IRCUT_NONE
+
+    config NID_PIN_IRCUT_B
+        int "GPIO IR-cut B (pont en H)"
+        range -1 54
+        default 36
+        depends on NID_IRCUT_PULSE
+
+    config NID_IRCUT_DAY_LEVEL
+        int "Niveau du fil IR-cut pour le mode jour (filtre en place)"
+        range 0 1
+        default 1
+        depends on NID_IRCUT_LEVEL
+
+    config NID_IRCUT_PULSE_MS
+        int "Durée de l'impulsion IR-cut (ms)"
+        range 20 1000
+        default 150
+        depends on NID_IRCUT_PULSE
+
+    config NID_PIN_BATT_ADC
+        int "GPIO mesure de la tension batterie (ADC1 : 16-23, ADC2 : 49-54 ; -1 = aucune)"
+        range -1 54
+        default 21
+        help
+            Pont diviseur depuis la batterie (ex. 100 kΩ / 100 kΩ). Sans mesure,
+            l'arrêt propre sur seuil bas (FC3.4) n'est pas assuré par le logiciel.
+
+    config NID_BATT_DIVIDER_X1000
+        int "Rapport du pont diviseur × 1000 (Vbat = Vadc × rapport / 1000)"
+        range 1000 20000
+        default 2000
+
+    config NID_PIN_LDR_ADC
+        int "GPIO photorésistance optionnelle (ADC ; -1 = aucune)"
+        range -1 54
+        default -1
+
+    config NID_PIN_POWER_OFF
+        int "GPIO commande OFF de l'interrupteur d'alimentation Pololu (-1 = aucune)"
+        range -1 54
+        default 47
+        help
+            Utilisé seulement dans l'architecture « coupure matérielle » : un niveau
+            haut sur OFF coupe l'alimentation de la carte en fin de cycle.
+
+    config NID_I2C_PORT
+        int "Port I2C partagé (caméra, codec audio, horloge DS3231)"
+        range 0 1
+        default 0
+
+    config NID_PIN_I2C_SDA
+        int "GPIO I2C SDA"
+        range 0 54
+        default 7
+
+    config NID_PIN_I2C_SCL
+        int "GPIO I2C SCL"
+        range 0 54
+        default 8
+
+    config NID_I2C_FREQ_HZ
+        int "Fréquence I2C (Hz)"
+        range 10000 400000
+        default 100000
+
+    config NID_PIN_C6_RESET
+        int "GPIO reset du coprocesseur Wi-Fi ESP32-C6 (-1 = aucun)"
+        range -1 54
+        default 54
+        help
+            Le C6 est maintenu en reset hors mode installation pour économiser
+            l'énergie (FC3.2).
+
+    config NID_PIN_LCD_BACKLIGHT
+        int "GPIO rétroéclairage LCD, maintenu éteint (-1 = aucun)"
+        range -1 54
+        default 26
+
+    config NID_PIN_AUDIO_PA
+        int "GPIO activation de l'ampli audio NS4150B, maintenu coupé (-1 = aucun)"
+        range -1 54
+        default 53
+
+    config NID_PIN_CAM_RESET
+        int "GPIO reset du capteur caméra (-1 = aucun)"
+        range -1 54
+        default -1
+
+    config NID_PIN_CAM_PWDN
+        int "GPIO power-down du capteur caméra (-1 = aucun)"
+        range -1 54
+        default -1
+
+    menu "Audio (codec ES8311)"
+        config NID_PIN_I2S_MCLK
+            int "I2S MCLK"
+            default 13
+        config NID_PIN_I2S_BCLK
+            int "I2S BCLK"
+            default 12
+        config NID_PIN_I2S_WS
+            int "I2S WS (LRCK)"
+            default 10
+        config NID_PIN_I2S_DOUT
+            int "I2S DOUT (vers le codec)"
+            default 9
+        config NID_PIN_I2S_DIN
+            int "I2S DIN (depuis le micro)"
+            default 11
+        config NID_ES8311_I2C_ADDR
+            hex "Adresse I2C de l'ES8311 (8 bits)"
+            default 0x30
+    endmenu
+
+    menu "Carte microSD (SDMMC)"
+        config NID_SD_BUS_WIDTH
+            int "Largeur du bus SD (1 ou 4)"
+            range 1 4
+            default 4
+        config NID_SD_FREQ_KHZ
+            int "Fréquence SD (kHz)"
+            range 400 50000
+            default 40000
+        config NID_SD_LDO_CHAN
+            int "Canal du LDO interne alimentant la carte SD (-1 = aucun)"
+            range -1 4
+            default 4
+            help
+                Sur ESP32-P4, l'alimentation de la carte SD passe par le LDO
+                interne canal 4 (VO4) sur la P4X-Function-EV-Board.
+        config NID_PIN_SD_CLK
+            int "SD CLK"
+            default 43
+        config NID_PIN_SD_CMD
+            int "SD CMD"
+            default 44
+        config NID_PIN_SD_D0
+            int "SD D0"
+            default 39
+        config NID_PIN_SD_D1
+            int "SD D1"
+            default 40
+        config NID_PIN_SD_D2
+            int "SD D2"
+            default 41
+        config NID_PIN_SD_D3
+            int "SD D3"
+            default 42
+    endmenu
+
+endmenu

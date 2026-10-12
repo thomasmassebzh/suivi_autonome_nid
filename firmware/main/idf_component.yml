@@ -1,0 +1,5 @@
+## Version d'ESP-IDF figée pour tout le projet (plan firmware ESP32-P4).
+## Les dépendances du registre Espressif sont déclarées par chaque composant
+## (components/*/idf_component.yml).
+dependencies:
+  idf: ">=6.1"

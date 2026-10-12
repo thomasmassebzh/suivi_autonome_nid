@@ -1,0 +1,61 @@
+menu "Suivi nid — Application"
+
+    choice NID_RUN_MODE
+        prompt "Mode de fonctionnement"
+        default NID_MODE_FIELD
+        help
+            Terrain : veille profonde entre deux événements (autonomie FC3.1).
+            Banc d'essai : la carte reste éveillée, la caméra reste initialisée,
+            les événements arrivent par interruption ; pratique pour mesurer
+            les délais et mettre au point (plan firmware, étape 2).
+
+        config NID_MODE_FIELD
+            bool "Terrain : veille profonde entre deux événements"
+        config NID_MODE_BENCH
+            bool "Banc d'essai : toujours éveillé"
+    endchoice
+
+    choice NID_POWER_ARCH
+        prompt "Architecture d'alimentation"
+        default NID_POWER_DEEP_SLEEP
+        help
+            Veille profonde : la carte reste alimentée, l'ESP32-P4 dort
+            (preuve de concept retenue). Coupure matérielle : interrupteur
+            Pololu commandé par le PIR et l'alarme du DS3231 (architecture
+            cible « Arch ESP-P4 »), l'ESP32-P4 coupe lui-même son alimentation.
+
+        config NID_POWER_DEEP_SLEEP
+            bool "Veille profonde de l'ESP32-P4"
+        config NID_POWER_LATCH
+            bool "Coupure matérielle (interrupteur Pololu + alarme DS3231)"
+    endchoice
+
+    config NID_INSTALL_ON_POWER_ON
+        bool "Ouvrir le mode installation à la mise sous tension"
+        default y
+
+    config NID_BENCH_SEQ_DURATION_S
+        int "Durée de séquence imposée en mode banc (s, 0 = valeur de config.ini)"
+        range 0 300
+        default 10
+        depends on NID_MODE_BENCH
+
+    config NID_WDT_TIMEOUT_S
+        int "Délai du chien de garde (s)"
+        range 5 120
+        default 30
+        help
+            Une tâche bloquée plus longtemps provoque un redémarrage, puis la
+            surveillance reprend seule (FC3.3 : reprise ≤ 5 min).
+
+    config NID_BATT_RECHECK_S
+        int "Contrôle de la batterie après arrêt critique (s, 0 = jamais)"
+        range 0 86400
+        default 21600
+
+    config NID_MAX_CHAINED_SEQUENCES
+        int "Séquences enchaînées max. si le PIR reste actif (délai désactivé)"
+        range 1 100
+        default 10
+
+endmenu

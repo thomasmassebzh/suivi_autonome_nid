@@ -1,0 +1,86 @@
+# Valeurs par défaut du firmware « Suivi nid » — ESP32-P4X-Function-EV-Board
+#
+# Ce fichier est lu à la création de `sdkconfig` (première compilation, ou
+# après « ESP-IDF: Full Clean »). Les réglages de terrain modifiables sans
+# reprogrammer sont dans /sdcard/config.ini (voir README).
+
+# ----------------------------------------------------------------------------
+# Puce, flash, mémoire
+# ----------------------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32p4"
+# Carte P4X : puce rév. ≥ 3.1. Ne PAS cocher ESP32P4_SELECTS_REV_LESS_V3 :
+# les binaires rév. 1.x et 3.x ne sont pas compatibles.
+CONFIG_ESP32P4_REV_MIN_301=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM 32 Mo (tampons image, encodeurs)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+# Démarrage plus rapide : pas de test mémoire de la PSRAM (délai détection → image, FP1.4)
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# ----------------------------------------------------------------------------
+# Démarrage rapide après réveil (FP1.4 : ≤ 1 s entre détection et image)
+# ----------------------------------------------------------------------------
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Horloge basse consommation : quartz 32,768 kHz de la carte (dérive en veille, FP1.6)
+CONFIG_RTC_CLK_SRC_EXT_CRYS=y
+
+# ----------------------------------------------------------------------------
+# Sûreté de fonctionnement (FC3.3 : reprise ≤ 5 min après un défaut)
+# ----------------------------------------------------------------------------
+CONFIG_BOOTLOADER_WDT_ENABLE=y
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+CONFIG_ESP_BROWNOUT_DET=y
+
+# ----------------------------------------------------------------------------
+# FreeRTOS
+# ----------------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ----------------------------------------------------------------------------
+# Carte microSD / FAT (FP1.7)
+# ----------------------------------------------------------------------------
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+
+# ----------------------------------------------------------------------------
+# Caméra et vidéo (esp_video / esp_cam_sensor)
+# ----------------------------------------------------------------------------
+# Capteurs détectés automatiquement : OV5647 (caméra IR-cut Waveshare / Arducam)
+# et SC2336 (caméra 2 MP fournie avec la carte, pour le banc d'essai).
+CONFIG_CAMERA_OV5647=y
+CONFIG_CAMERA_SC2336=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+
+# ----------------------------------------------------------------------------
+# Audio (codec ES8311)
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Wi-Fi d'installation via le coprocesseur ESP32-C6 (ESP-Hosted, SDIO)
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Serveur web d'installation
+# ----------------------------------------------------------------------------
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

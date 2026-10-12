@@ -1,0 +1,10 @@
+# Produits de compilation ESP-IDF
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# Fichiers propres au poste de chaque développeur
+.vscode/
+.devcontainer/
+*.code-workspace

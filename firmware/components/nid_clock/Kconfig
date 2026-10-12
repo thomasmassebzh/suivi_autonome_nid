@@ -1,0 +1,26 @@
+menu "Suivi nid — Horloge temps réel"
+
+    choice NID_RTC_MODEL
+        prompt "Horloge temps réel externe"
+        default NID_RTC_AUTO
+        help
+            DS3231 recommandé (3,3 V, ±2 ppm, alarme, température) : dérive
+            ≤ 1 min sur 14 jours (FP1.6). Le module DS1307 de l'inventaire
+            fonctionne en 5 V : ne pas relier ses résistances de tirage I2C à
+            5 V sur les broches de l'ESP32-P4.
+
+        config NID_RTC_AUTO
+            bool "Détection automatique (DS3231, sinon DS1307)"
+        config NID_RTC_DS3231
+            bool "DS3231"
+        config NID_RTC_DS1307
+            bool "DS1307"
+        config NID_RTC_NONE
+            bool "Aucune (horloge interne uniquement, heure réglée depuis le smartphone)"
+    endchoice
+
+    config NID_RTC_I2C_ADDR
+        hex "Adresse I2C (7 bits)"
+        default 0x68
+
+endmenu
