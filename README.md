@@ -27,10 +27,11 @@ versions figées des composants). Modules :
 | `nid_ir` | fait : LED 940 nm, filtre IR-cut, lever/coucher du soleil, avec tests sur PC (`make -C firmware/components/nid_ir/test_host`) |
 | `nid_install` | fait : Wi-Fi via le C6, page web (aperçu, réglages, heure, maintenance) — à valider sur la carte |
 | `nid_capture` | **à terminer** : police et incrustation date/heure faites (`nid_overlay.c`) ; reste la chaîne caméra → H.264 → MP4 + son AAC, la photo JPEG et l'aperçu |
-| `nid_storage`, `nid_clock` | **à faire** : interfaces définies (fonctions provisoires) ; montage de la carte SD, nommage, journal ; pilote DS3231/DS1307 |
+| `nid_storage` | fait : montage de la carte SD (LDO interne), nommage, écriture sécurisée `.tmp` → nom final, récupération `_INCOMPLET`, journal CSV |
+| `nid_clock` | **à faire** : pilote DS3231/DS1307 (interface définie, fonctions provisoires) |
 
-Tant que ces trois modules ne sont pas terminés, le système démarre, dort et se réveille, mais
-n'enregistre aucun fichier.
+Tant que la capture n'est pas terminée, le système démarre, dort, se réveille et tient son
+journal, mais n'enregistre ni vidéo ni photo.
 
 > Sommaire : [Matériel](#matériel) · [Installer l'environnement](#1-installer-lenvironnement) ·
 > [Ouvrir le projet](#2-ouvrir-le-projet) · [Cible et configuration](#3-choisir-la-cible-et-configurer) ·
