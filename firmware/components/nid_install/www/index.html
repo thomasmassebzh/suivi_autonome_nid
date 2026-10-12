@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Caméra de nid – installation</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--f:#f2f5f1;--c:#fff;--t:#1b281d;--m:#5c6b5e;--a:#2e7d32;--o:#b45309;--e:#c62828;--b:#d4dcd3}
+@media(prefers-color-scheme:dark){:root{--f:#0f1410;--c:#1a221b;--t:#e3ebe3;--m:#9aaa9c;--a:#4caf50;--o:#e08a1e;--e:#ef6b6b;--b:#2d382e}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--f);color:var(--t)}
+header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;gap:8px;padding:10px 16px;background:var(--a);color:#fff}
+main{max-width:680px;margin:auto;padding:2px 16px 28px}
+section{background:var(--c);border:1px solid var(--b);border-radius:12px;padding:12px 14px;margin:12px 0}
+h2{font-size:1.05rem;margin:0 0 8px}
+#v{display:block;width:100%;min-height:120px;background:#000;border-radius:8px}
+.r{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+button{flex:1 1 140px;font:inherit;min-height:46px;padding:10px 12px;border:0;border-radius:10px;background:var(--b);color:var(--t)}
+button:active{opacity:.7}
+.p{background:var(--a);color:#fff}.w{background:var(--o);color:#fff}
+.n{color:var(--m);font-size:.9rem;margin:6px 0 0}
+.x{color:var(--e)}.k{color:var(--a)}
+table{width:100%;border-collapse:collapse}
+td{padding:5px 0;border-bottom:1px solid var(--b);vertical-align:top}
+td:first-child{color:var(--m);width:42%;padding-right:8px}
+fieldset{border:1px solid var(--b);border-radius:10px;margin:0 0 10px;padding:4px 10px 10px}
+legend{font-weight:600;padding:0 4px}
+label{display:block;margin:8px 0 2px}
+input,select{width:100%;font:inherit;padding:8px;border:1px solid var(--b);border-radius:8px;background:var(--f);color:var(--t)}
+input[type=checkbox]{width:auto;transform:scale(1.4);margin:6px 4px}
+.u{color:var(--m);font-size:.85rem}
+.bad{border:2px solid var(--e)}.fix{border:2px solid var(--o)}
+#ban{background:var(--o);color:#fff;border-radius:10px;padding:10px 12px;margin:12px 0}
+#end{position:fixed;inset:0;z-index:9;background:var(--f);padding:40px 22px;text-align:center}
+#end h2{font-size:1.4rem;color:var(--a)}
+</style>
+</head>
+<body>
+<header><b id="ti">Caméra de nid</b><span id="rt"></span></header>
+<main>
+<div id="ban" hidden></div>
+<section><h2>Aperçu</h2>
+<img id="v" alt="Aperçu de la caméra">
+<p id="vm" class="n"></p>
+<div class="r"><button id="bi">Éclairage IR : allumer</button><button id="bp">Photo de test</button></div>
+<p id="pm" class="n"></p>
+</section>
+<section><h2>État</h2><table id="st"><tr><td>Chargement…</td></tr></table></section>
+<section><h2>Heure</h2>
+<p>Boîtier : <b id="hb">–</b><br>Téléphone : <b id="hp">–</b></p>
+<button id="bh" class="p">Mettre à l'heure du téléphone</button>
+<p id="hm" class="n"></p>
+</section>
+<section><h2>Réglages</h2>
+<form id="fo" onsubmit="return false"></form>
+<button id="bs" class="p">Enregistrer les réglages</button>
+<p id="sm" class="n"></p>
+<p class="n">Nom et mot de passe du Wi-Fi, durée maximale : pris en compte à la prochaine installation.</p>
+</section>
+<section><h2>Actions</h2>
+<div class="r"><button id="bg" class="p">Démarrer la surveillance</button><button id="bm" class="w">Pause maintenance (changer carte/batterie)</button></div>
+<p class="n">Bouton du boîtier : appui court = démarrer la surveillance ; appui long (3 s, le voyant clignote vite) = pause maintenance.</p>
+</section>
+</main>
+<div id="end" hidden><h2 id="et"></h2><p id="ex"></p></div>
+<script>
+"use strict";
+var G=[
+["Système",[["id_systeme","Identifiant du système","t",{h:"1 à 15 caractères : lettres, chiffres, _ ou -"}],["id_nid","Identifiant du nid","t",{}],["fuseau_horaire","Fuseau horaire (POSIX)","t",{h:"AST4 = Martinique (UTC−4)"}]]],
+["Vidéo",[["duree_sequence_s","Durée d'une séquence","n",{u:"s",a:1,z:300}],["delai_entre_declenchements_s","Délai entre deux déclenchements","n",{u:"s",a:0,z:3600,h:"0 = enchaîner tant que l'animal est détecté"}],["resolution","Résolution","s",{o:[["1920x1080","1920 × 1080"],["1280x960","1280 × 960"],["1280x720","1280 × 720"]]}],["images_par_seconde","Images par seconde","n",{u:"img/s",a:10,z:30}],["debit_kbps","Débit vidéo","n",{u:"kbit/s",a:500,z:10000}],["son","Enregistrer le son","b",{}]]],
+["Photo",[["intervalle_suivi_min","Intervalle des photos de suivi","n",{u:"min",a:0,z:1440,h:"0 = pas de photo de suivi"}],["qualite_jpeg","Qualité JPEG","n",{u:"%",a:10,z:100}]]],
+["Détection",[["sensibilite","Sensibilité de détection","n",{a:1,z:5,h:"1 = peu sensible … 5 = très sensible"}],["chauffe_pir_s","Chauffe du détecteur après mise sous tension","n",{u:"s",a:0,z:120}]]],
+["Nuit",[["mode","Mode jour / nuit","s",{o:[["auto","automatique (soleil)"],["jour","toujours jour"],["nuit","toujours nuit"]]}],["latitude","Latitude","n",{u:"°, nord positif",a:-90,z:90,s:"any"}],["longitude","Longitude","n",{u:"°, est positif",a:-180,z:180,s:"any"}],["avance_crepuscule_min","Nuit commence avant le coucher du soleil","n",{u:"min",a:-180,z:240}],["retard_aube_min","Nuit finit après le lever du soleil","n",{u:"min",a:-180,z:240}],["puissance_ir","Puissance de l'éclairage infrarouge","n",{u:"%",a:0,z:100}],["nuit_monochrome","Image en noir et blanc la nuit","b",{}]]],
+["Énergie",[["seuil_batterie_basse_mv","Seuil batterie basse","n",{u:"mV",a:2800,z:4500,h:"en dessous : photos seulement"}],["seuil_batterie_critique_mv","Seuil batterie critique","n",{u:"mV",a:2800,z:4500,h:"en dessous : arrêt propre"}]]],
+["Installation",[["wifi_ssid","Nom du Wi-Fi","t",{l:32,h:"vide = NID-<identifiant du système>"}],["wifi_mot_de_passe","Mot de passe du Wi-Fi","t",{l:63,h:"8 à 63 caractères"}],["duree_max_min","Durée maximale du mode installation","n",{u:"min",a:1,z:60}]]]
+];
+var C={},S=null,ir=false,ended=false,fails=0,vt=0,idle=0;
+function $(i){return document.getElementById(i)}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function fr(n,d){return Number(n).toLocaleString("fr-FR",{maximumFractionDigits:d||0})}
+function ms(x){x=Math.max(0,x|0);return Math.floor(x/60)+" min "+("0"+x%60).slice(-2)+" s"}
+function msg(i,t,err,html){var e=$(i);e[html?"innerHTML":"textContent"]=t||"";e.className="n"+(err?" x":"")}
+function api(u,body){var o={cache:"no-store"};if(body){o.method="POST";o.body=new URLSearchParams(body)}return fetch(u,o).then(function(r){return r.json()})}
+function bo(v){return v===true||v===1||/^(1|oui|true|on|yes)$/i.test(String(v))}
+function each(f){G.forEach(function(g){g[1].forEach(f)})}
+function build(){var h="";G.forEach(function(g){h+="<fieldset><legend>"+g[0]+"</legend>";g[1].forEach(function(d){var k=d[0],o=d[3];h+='<label for="f_'+k+'">'+d[1]+(o.u?' <span class="u">('+o.u+")</span>":"")+"</label>";if(d[2]=="b")h+='<input type="checkbox" id="f_'+k+'">';else if(d[2]=="s")h+='<select id="f_'+k+'">'+o.o.map(function(x){return'<option value="'+x[0]+'">'+x[1]+"</option>"}).join("")+"</select>";else if(d[2]=="n")h+='<input id="f_'+k+'" type="number" inputmode="decimal" step="'+(o.s||1)+'" min="'+o.a+'" max="'+o.z+'">';else h+='<input id="f_'+k+'" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"'+(o.l?' maxlength="'+o.l+'"':"")+">";if(o.h)h+='<div class="u">'+o.h+"</div>"});h+="</fieldset>"});$("fo").innerHTML=h}
+function cur(d){var e=$("f_"+d[0]);return d[2]=="b"?(e.checked?"oui":"non"):e.value.trim()}
+function org(d){var v=C[d[0]];return d[2]=="b"?(bo(v)?"oui":"non"):(v==null?"":String(v))}
+function same(a,b,t){return a===b||(t=="n"&&a!==""&&b!==""&&Number(a)===Number(b))}
+function fill(c){C=c||{};each(function(d){var e=$("f_"+d[0]);if(!e||!(d[0]in C))return;e.classList.remove("bad","fix");if(d[2]=="b")e.checked=bo(C[d[0]]);else e.value=C[d[0]]})}
+function load(){api("/api/config").then(fill).catch(function(){msg("sm","Réglages illisibles : recharger la page.",1)})}
+function save(){var p={},sent=[];each(function(d){if(!(d[0]in C))return;var v=cur(d);if(!same(v,org(d),d[2])){p[d[0]]=v;sent.push(d)}});if(!sent.length){msg("sm","Aucune modification.");return}msg("sm","Enregistrement…");api("/api/config",p).then(function(r){var er=r.erreurs||{};if(r.config)fill(r.config);sent.forEach(function(d){var e=$("f_"+d[0]);if(er[d[0]])e.classList.add("bad");else if(!same(p[d[0]],org(d),d[2]))e.classList.add("fix")});var m=r.message||"",l=Object.keys(er).map(function(k){return k+" : "+er[k]});if(l.length)m+=" ("+l.join(" ; ")+")";if(r.corrige)m+=" Champs corrigés encadrés en orange.";msg("sm",m,!r.ok)}).catch(function(){msg("sm","Échec de l'envoi.",1)})}
+function ban(t){var b=$("ban");b.textContent=t;b.hidden=!t}
+function stream(){clearTimeout(vt);if(ended||document.hidden||(S&&!S.camera_prete))return;$("v").src="/stream?t="+Date.now()}
+$("v").onerror=function(){if(ended||document.hidden)return;msg("vm","Aperçu indisponible ou affiché sur un autre téléphone : nouvel essai…",1);clearTimeout(vt);vt=setTimeout(stream,3000)};
+$("v").onload=function(){msg("vm","")};
+document.addEventListener("visibilitychange",function(){if(document.hidden)$("v").removeAttribute("src");else stream()});
+var EN={demarrage:["Surveillance démarrée","Le voyant du boîtier clignote 5 fois puis s'éteint. Le Wi-Fi s'arrête : vous pouvez quitter le nid."],maintenance:["Pause maintenance","Attendez 2 clignotements lents du voyant : la carte SD et la batterie peuvent alors être retirées. Pour reprendre : remettre la carte ou la batterie puis appuyer sur le bouton du boîtier."],delai:["Fin du mode installation","Durée maximale atteinte : la surveillance démarre automatiquement."]};
+function end(k){if(ended)return;ended=true;clearTimeout(vt);$("v").removeAttribute("src");var e=EN[k]||EN.demarrage;$("et").textContent=e[0];$("ex").textContent=e[1];$("end").hidden=false}
+function row(l,v){return"<tr><td>"+l+"</td><td>"+v+"</td></tr>"}
+function show(s){var prev=S;S=s;$("rt").textContent="fin dans "+ms(s.reste_s);$("ti").textContent=s.ssid||"Caméra de nid";$("hb").textContent=s.heure+(s.heure_valide?"":" (non réglée)");var dt=s.epoch-Date.now()/1000;ban(s.heure_valide?(Math.abs(dt)>120?"L'heure du boîtier diffère de celle du téléphone de "+ms(Math.abs(dt))+" : la régler ci-dessous.":""):"Heure non réglée : touchez « Mettre à l'heure du téléphone ».");ir=s.ir;$("bi").textContent="Éclairage IR : "+(ir?"éteindre":"allumer");var lv={ok:"correcte",basse:"basse",critique:"critique"}[s.batt_niveau]||"inconnue";var h=row("Heure locale",esc(s.heure)+(s.heure_valide?"":' <b class="x">non réglée</b>'));h+=row("Batterie",s.batt_mv?fr(s.batt_mv)+" mV ("+lv+")":"inconnue");h+=row("Carte SD",s.sd?fr(s.sd_libre/1e9,1)+" Go libres sur "+fr(s.sd_total/1e9,1)+" Go":'<b class="x">absente</b>');h+=row("Caméra",esc(s.camera)+(s.camera_prete?"":' <b class="x">indisponible</b>'));h+=row("Horloge RTC",esc(s.rtc)+(s.temp!=null?", "+fr(s.temp,1)+" °C":""));h+=row("Détecteur PIR",s.pir?'<b class="k">● mouvement</b>':"○ repos");h+=row("Jour / nuit",(s.nuit?"nuit":"jour")+" (mode "+esc(s.mode_nuit)+")");h+=row("Éclairage IR",s.ir?"allumé ("+s.puissance_ir+" %)":"éteint");h+=row("Téléphones connectés",s.clients);h+=row("Identifiants",esc(s.ident));h+=row("Firmware",esc(s.firmware)+" ; coprocesseur Wi-Fi "+esc(s.coproc));h+=row("Fin automatique","dans "+ms(s.reste_s));$("st").innerHTML=h;if(!s.camera_prete)msg("vm","Caméra indisponible.",1);else if(prev&&!prev.camera_prete)stream();idle=(!s.apercu&&s.camera_prete&&!document.hidden)?idle+1:0;if(idle>=4){idle=0;stream()}if(s.fin)end(s.fin)}
+function poll(){if(ended)return;api("/api/status").then(function(s){fails=0;show(s)}).catch(function(){if(++fails>=3&&!ended)ban("Connexion au boîtier perdue : vérifier le Wi-Fi du téléphone.")}).then(function(){setTimeout(poll,1000)})}
+function act(u,q,ok){if(!confirm(q))return;api(u,{}).then(function(r){if(r.ok)end(ok);else alert(r.message)}).catch(function(){alert("Échec de l'envoi.")})}
+$("bi").onclick=function(){api("/api/ir",{on:ir?0:1}).then(function(r){ir=r.ir;$("bi").textContent="Éclairage IR : "+(ir?"éteindre":"allumer");msg("pm",r.message,!r.ok)}).catch(function(){msg("pm","Échec de l'envoi.",1)})};
+$("bp").onclick=function(){msg("pm","Photo en cours…");api("/api/photo",{}).then(function(r){msg("pm",esc(r.message)+(r.ok?' <a href="/photo?t='+Date.now()+'" target="_blank">Voir la photo</a>':""),!r.ok,1)}).catch(function(){msg("pm","Échec de l'envoi.",1)})};
+$("bh").onclick=function(){api("/api/time",{epoch:Math.floor(Date.now()/1000)}).then(function(r){msg("hm",r.message,!r.ok)}).catch(function(){msg("hm","Échec de l'envoi.",1)})};
+$("bs").onclick=save;
+$("bg").onclick=function(){act("/api/start","Démarrer la surveillance maintenant ?","demarrage")};
+$("bm").onclick=function(){act("/api/maintenance","Pause maintenance : l'enregistrement s'arrête et la carte SD est démontée. Continuer ?","maintenance")};
+setInterval(function(){$("hp").textContent=new Date().toLocaleString("fr-FR")},1000);
+build();load();poll();stream();
+</script>
+</body>
+</html>

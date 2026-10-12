@@ -1,0 +1,10 @@
+## Dépendances du module de capture, figées (plan firmware ESP32-P4, Notion).
+## Après la première compilation réussie, versionner firmware/dependencies.lock.
+dependencies:
+  idf: ">=6.1"
+  espressif/esp_video: "2.5.0"
+  espressif/esp_cam_sensor: "2.6.0"
+  espressif/esp_h264: "1.4.1"
+  espressif/esp_muxer: "1.2.3"
+  espressif/esp_audio_codec: "~2.6.2"
+  espressif/esp_codec_dev: "^1.6.0"

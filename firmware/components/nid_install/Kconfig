@@ -1,0 +1,53 @@
+menu "Suivi nid — Mode installation"
+
+    config NID_INSTALL_WIFI_CHANNEL
+        int "Canal du point d'accès Wi-Fi d'installation"
+        range 1 13
+        default 6
+
+    config NID_INSTALL_WIFI_MAX_CLIENTS
+        int "Nombre maximal de téléphones connectés"
+        range 1 4
+        default 2
+
+    config NID_INSTALL_WIFI_START_TIMEOUT_S
+        int "Délai maximal de démarrage du Wi-Fi (s)"
+        range 5 60
+        default 15
+        help
+            Garde-fou global : si le point d'accès n'est pas prêt dans ce délai,
+            le mode installation continue sans Wi-Fi (voyant : double éclat
+            toutes les 2 s ; appui court = démarrer, appui long = maintenance).
+            Un ESP32-C6 qui ne répond pas est normalement détecté plus tôt par
+            ESP-Hosted (reset 1,5 s + énumération SDIO 1,5 s +
+            CONFIG_ESP_HOSTED_HOST_CP_BRINGUP_TIMEOUT_MS).
+
+    config NID_INSTALL_PREVIEW_MAX_WIDTH
+        int "Largeur maximale de l'aperçu (pixels)"
+        range 320 1920
+        default 640
+
+    config NID_INSTALL_PREVIEW_QUALITY
+        int "Qualité JPEG de l'aperçu"
+        range 10 100
+        default 60
+
+    config NID_INSTALL_PREVIEW_MAX_FPS
+        int "Cadence maximale de l'aperçu (images/s)"
+        range 1 30
+        default 8
+
+    config NID_INSTALL_HTTPD_STACK_SIZE
+        int "Pile de la tâche du serveur web (octets)"
+        range 4096 16384
+        default 8192
+        help
+            Les gestionnaires appellent nid_config_save(), nid_capture_photo()
+            et nid_clock_set_time() depuis la tâche du serveur web.
+
+    config NID_INSTALL_HTTPD_MAX_URI_HANDLERS
+        int "Nombre maximal de gestionnaires d'URI du serveur web"
+        range 11 32
+        default 16
+
+endmenu
