@@ -478,11 +478,9 @@ static void handle_timer(void)
         /* Contrôle après un arrêt critique (rechargement solaire possible). */
         bool sd = storage_up();
         uint32_t mv = read_battery();
-        if (mv == 0 || mv < st->cfg.batt_low_mv) {
-            if (sd) {
-                nid_storage_journal("batterie_critique", "toujours %" PRIu32 " mV", mv);
-            }
-            critical_shutdown("contrôle");
+        /* Hystérésis : reprise seulement au-dessus du seuil bas. */
+        if (mv != 0 && mv < st->cfg.batt_low_mv) {
+            critical_shutdown("contrôle périodique");
         }
         st->batt_level = NID_BATT_OK;
         if (sd) {
