@@ -14,6 +14,24 @@ la Caravelle, client OFB). Il tourne sur la carte **ESP32-P4X-Function-EV-Board*
 - **mode installation** : Wi-Fi local, aperçu en direct et réglages sur smartphone, mise à l'heure (FS1.2 à FS1.4) ;
 - veille profonde entre deux événements, chien de garde, arrêt propre sur batterie faible (FC3.1 à FC3.4).
 
+## État d'avancement
+
+Le firmware **compile sans avertissement** pour l'ESP32-P4 avec ESP-IDF v6.1 (vérifié avec les
+versions figées des composants). Modules :
+
+| Module | État |
+|---|---|
+| `main` (cycle réveil → action → veille, état conservé en mémoire RTC) | fait |
+| `nid_board`, `nid_detect`, `nid_power` | faits : veille profonde, réveils PIR / bouton / minuterie, batterie, chien de garde — à valider sur la carte |
+| `nid_config` | fait : lecture et écriture de `config.ini` |
+| `nid_ir` | fait : LED 940 nm, filtre IR-cut, lever/coucher du soleil, avec tests sur PC (`make -C firmware/components/nid_ir/test_host`) |
+| `nid_install` | fait : Wi-Fi via le C6, page web (aperçu, réglages, heure, maintenance) — à valider sur la carte |
+| `nid_capture` | **à terminer** : police et incrustation date/heure faites (`nid_overlay.c`) ; reste la chaîne caméra → H.264 → MP4 + son AAC, la photo JPEG et l'aperçu |
+| `nid_storage`, `nid_clock` | **à faire** : interfaces définies (fonctions provisoires) ; montage de la carte SD, nommage, journal ; pilote DS3231/DS1307 |
+
+Tant que ces trois modules ne sont pas terminés, le système démarre, dort et se réveille, mais
+n'enregistre aucun fichier.
+
 > Sommaire : [Matériel](#matériel) · [Installer l'environnement](#1-installer-lenvironnement) ·
 > [Ouvrir le projet](#2-ouvrir-le-projet) · [Cible et configuration](#3-choisir-la-cible-et-configurer) ·
 > [Compiler](#4-compiler) · [Flasher](#5-flasher) · [Moniteur série](#6-moniteur-série) ·

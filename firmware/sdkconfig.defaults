@@ -79,6 +79,12 @@ CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 # ----------------------------------------------------------------------------
 # Wi-Fi d'installation via le coprocesseur ESP32-C6 (ESP-Hosted, SDIO)
 # ----------------------------------------------------------------------------
+CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+# Le C6 ne démarre qu'en mode installation (réveil ≤ 1 s, FP1.4) et une panne
+# du lien ne doit pas redémarrer tout le système.
+# CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN is not set
+# CONFIG_ESP_HOSTED_HOST_TRANSPORT_RESTART_ON_FAILURE is not set
 
 # ----------------------------------------------------------------------------
 # Serveur web d'installation

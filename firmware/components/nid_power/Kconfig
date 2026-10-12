@@ -1,0 +1,53 @@
+menu "Suivi nid — Énergie et veille"
+
+    config NID_BATT_SAMPLES
+        int "Échantillons ADC par mesure de la batterie"
+        range 4 64
+        default 16
+        help
+            Moyenne tronquée (les 1/8 plus bas et plus hauts sont écartés) :
+            rejette les creux de tension dus aux appels de courant (caméra,
+            LED IR). Une mesure de 16 échantillons dure moins d'une milliseconde.
+
+    config NID_BUTTON_RELEASE_WAIT_MS
+        int "Attente du relâchement du bouton avant la veille (ms)"
+        range 0 10000
+        default 3000
+        help
+            Le réveil par le bouton se fait sur niveau bas : un bouton encore
+            appuyé réveillerait aussitôt le système. Si le bouton reste appuyé
+            plus longtemps (bouton bloqué, infiltration d'eau), il n'est pas
+            utilisé comme source de réveil pour cette veille-là.
+
+    config NID_SLEEP_SILENT_ROM
+        bool "Supprimer les messages de la ROM au réveil (démarrage plus rapide)"
+        default y
+        help
+            Gagne environ 20 à 30 ms par réveil sur la console série à
+            115200 bauds (FP1.4 : délai détection → première image). Les
+            messages de la ROM restent supprimés après un redémarrage sur défaut ;
+            ils réapparaissent après une coupure d'alimentation.
+
+    config NID_SLEEP_LDO_OFF
+        bool "Couper les LDO internes de la carte SD et du PHY MIPI avant la veille"
+        default y
+        help
+            ESP-IDF coupe lui-même la flash (VO1) et la PSRAM (VO2) en veille
+            profonde, mais pas VO3 (PHY MIPI) ni VO4 (domaine d'E/S de la carte
+            SD) : un module qui oublierait de les libérer augmenterait la
+            consommation en veille (voir le guide de la P4X). Cette option les
+            coupe juste avant la veille (canaux NID_MIPI_LDO_CHAN et
+            NID_SD_LDO_CHAN). Les canaux de la flash et de la PSRAM ne sont
+            jamais touchés.
+
+    config NID_LATCH_OFF_TIMEOUT_MS
+        int "Délai de coupure par l'interrupteur avant repli sur la veille profonde (ms)"
+        depends on NID_POWER_LATCH
+        range 200 10000
+        default 2000
+        help
+            Architecture « coupure matérielle » : après la commande OFF,
+            l'alimentation doit disparaître. Si la carte fonctionne encore après
+            ce délai (alimentation USB au banc), elle passe en veille profonde.
+
+endmenu

@@ -42,7 +42,20 @@ typedef struct {
     uint64_t           ext1_status;   /*!< broches à l'origine d'un réveil EXT1 */
 } nid_boot_info_t;
 
-/** Analyse la cause du démarrage (à appeler tôt dans app_main). */
+/**
+ * Analyse la cause du démarrage (à appeler tôt dans app_main, après
+ * nid_detect_init() et, en architecture « coupure », après nid_clock_init()).
+ *
+ * - Réveil de veille profonde : EXT1 sur le bouton → BUTTON (prioritaire si les
+ *   deux broches ont réveillé), EXT1 sur le PIR → PIR, minuterie → TIMER.
+ * - esp_restart() (tâche bloquée), panique, chiens de garde, chute ou
+ *   perturbation de tension, blocage du processeur, cause inconnue → FAULT.
+ * - Mise sous tension, bouton RESET, USB, JTAG → POWER_ON.
+ * - Architecture « coupure » (chaque allumage est une mise sous tension) :
+ *   bouton appuyé → BUTTON, sinon PIR actif → PIR, sinon drapeau d'alarme du
+ *   DS3231 → RTC_ALARM, sinon POWER_ON. Le drapeau est effacé à chaque démarrage
+ *   (nid_clock_clear_alarm), ce qui libère la sortie INT du DS3231.
+ */
 void nid_power_get_boot_info(nid_boot_info_t *out);
 
 /** Libellé français (« mise sous tension », « PIR »...). */
@@ -57,10 +70,19 @@ typedef enum {
     NID_BATT_CRITICAL,     /*!< sous seuil_batterie_critique_mv : arrêt propre (FC3.4) */
 } nid_batt_level_t;
 
-/** Prépare l'ADC (oneshot + calibration). ESP_ERR_NOT_SUPPORTED si aucune broche n'est configurée. */
+/**
+ * Prépare l'ADC (oneshot, atténuation 12 dB, étalonnage par courbe si les
+ * eFuses le permettent). ESP_ERR_NOT_SUPPORTED si aucune broche n'est configurée.
+ * L'unité ADC de la broche (ADC1 pour GPIO 16-23) est réservée par ce module.
+ */
 esp_err_t nid_power_battery_init(void);
 
-/** Tension batterie en mV (moyenne de plusieurs échantillons, pont diviseur compensé). */
+/**
+ * Tension batterie en mV : moyenne tronquée de CONFIG_NID_BATT_SAMPLES
+ * échantillons (< 1 ms), pont diviseur compensé. Utilisable depuis plusieurs
+ * tâches à la fois (verrou interne). *mv = 0 en cas d'erreur ;
+ * ESP_ERR_INVALID_STATE si nid_power_battery_init() n'a pas réussi.
+ */
 esp_err_t nid_power_battery_read_mv(uint32_t *mv);
 
 /** Classe une tension par rapport aux seuils (mv = 0 → NID_BATT_UNKNOWN). */
@@ -68,14 +90,19 @@ nid_batt_level_t nid_power_battery_level(uint32_t mv, uint32_t low_mv, uint32_t 
 
 /* ---------- Chien de garde (FC3.3) ---------- */
 
-/** Configure le chien de garde des tâches (panique → redémarrage) et y abonne la tâche appelante. */
+/**
+ * Configure le chien de garde des tâches (panique → redémarrage) et y abonne la
+ * tâche appelante. Les tâches « idle » restent surveillées selon le menuconfig.
+ * Une tâche abonnée qui reste bloquée plus de timeout_s sans appeler
+ * nid_power_watchdog_feed() provoque un redémarrage (reprise FAULT, FC3.3).
+ */
 esp_err_t nid_power_watchdog_start(uint32_t timeout_s);
 
-/** Abonne / désabonne la tâche appelante. */
+/** Abonne / désabonne la tâche appelante (idempotent). */
 esp_err_t nid_power_watchdog_add_current_task(void);
 esp_err_t nid_power_watchdog_remove_current_task(void);
 
-/** Nourrit le chien de garde pour la tâche appelante. */
+/** Nourrit le chien de garde pour la tâche appelante ; sans effet si elle n'est pas abonnée. */
 void nid_power_watchdog_feed(void);
 
 /* ---------- Veille ---------- */
@@ -93,10 +120,16 @@ typedef struct {
  * Avant l'appel, l'application doit avoir fermé ses fichiers et démonté la SD.
  * Si le PIR doit réveiller le système, sa sortie doit être retombée au repos
  * (sinon réveil immédiat) : utiliser nid_detect_wait_pir_idle().
+ * Le bouton est attendu relâché (CONFIG_NID_BUTTON_RELEASE_WAIT_MS) ; s'il
+ * reste appuyé, il n'est pas utilisé comme source de réveil pour cette veille.
+ * Si wake_on_pir est faux, la broche du PIR est isolée : il ne réveille pas.
  *
- * Architecture « coupure matérielle » : programme l'alarme du DS3231 puis
- * commande l'OFF de l'interrupteur ; si l'alimentation reste présente (USB au
- * banc), repli sur la veille profonde.
+ * Architecture « coupure matérielle » : programme l'alarme du DS3231 (si
+ * sleep_us) puis commande l'OFF de l'interrupteur ; si l'alimentation reste
+ * présente (USB au banc), si l'heure n'est pas valide ou si l'alarme ne peut
+ * être programmée, repli sur la veille profonde avec le même plan. Le PIR,
+ * relié matériellement à l'interrupteur, rallume la carte même si wake_on_pir
+ * est faux.
  */
 void nid_power_sleep(const nid_sleep_plan_t *plan) __attribute__((noreturn));
 
@@ -108,7 +141,11 @@ void nid_power_sleep(const nid_sleep_plan_t *plan) __attribute__((noreturn));
  */
 void nid_power_shutdown(uint32_t recheck_s) __attribute__((noreturn));
 
-/** Redémarrage logiciel (après un défaut détecté par l'application). */
+/**
+ * Redémarrage logiciel (après un défaut détecté par l'application) : sorties au
+ * repos maintenues pendant le redémarrage ; au démarrage suivant, la cause est
+ * NID_WAKE_FAULT (reprise sans installation).
+ */
 void nid_power_restart(void) __attribute__((noreturn));
 
 #ifdef __cplusplus

@@ -36,6 +36,14 @@ menu "Suivi nid — Carte et brochage"
         int "GPIO voyant d'état (allumé uniquement en installation ; -1 = aucun)"
         range -1 54
         default 46
+        help
+            Attention : sur l'ESP32-P4, les GPIO 39 à 48 forment le domaine d'E/S
+            de l'emplacement SD (SDMMC, broches D0-D7, CLK, CMD), alimenté sur la
+            P4X par le LDO interne VO4 (voir NID_SD_LDO_CHAN), qui n'est actif que
+            carte SD montée. Un voyant sur l'une de ces broches peut donc rester
+            éteint carte démontée (pause maintenance, carte absente) : à vérifier
+            sur le schéma ; sinon préférer une broche hors de ce domaine (GPIO 27,
+            23, 22 ou 20 du connecteur J1).
 
     config NID_STATUS_LED_ACTIVE_HIGH
         bool "Voyant d'état actif à l'état haut"
@@ -117,7 +125,14 @@ menu "Suivi nid — Carte et brochage"
         default 47
         help
             Utilisé seulement dans l'architecture « coupure matérielle » : un niveau
-            haut sur OFF coupe l'alimentation de la carte en fin de cycle.
+            haut sur OFF coupe l'alimentation de la carte en fin de cycle. La broche
+            est tenue au niveau bas en fonctionnement ; l'entrée OFF du module doit
+            avoir son propre tirage vers la masse (broche flottante au démarrage).
+
+            GPIO 47 appartient au domaine d'E/S de l'emplacement SD (GPIO 39 à 48),
+            alimenté sur la P4X par le LDO interne VO4 : nid_power active VO4 juste
+            avant de commander OFF. Une broche hors de ce domaine (ex. GPIO 22 ou
+            23) supprime cette dépendance.
 
     config NID_I2C_PORT
         int "Port I2C partagé (caméra, codec audio, horloge DS3231)"
@@ -145,7 +160,10 @@ menu "Suivi nid — Carte et brochage"
         default 54
         help
             Le C6 est maintenu en reset hors mode installation pour économiser
-            l'énergie (FC3.2).
+            l'énergie (FC3.2), y compris pendant la veille profonde (maintien de
+            la broche). En installation, nid_board_coproc_enable(true) relâche le
+            reset (sortie haute, non maintenue, non réservée) : ESP-Hosted peut
+            ensuite piloter cette même broche pour ses propres resets du C6.
 
     config NID_PIN_LCD_BACKLIGHT
         int "GPIO rétroéclairage LCD, maintenu éteint (-1 = aucun)"
@@ -166,6 +184,17 @@ menu "Suivi nid — Carte et brochage"
         int "GPIO power-down du capteur caméra (-1 = aucun)"
         range -1 54
         default -1
+
+    config NID_MIPI_LDO_CHAN
+        int "Canal du LDO interne alimentant le PHY MIPI de la caméra (-1 = aucun)"
+        range -1 4
+        default 3
+        help
+            Sur la P4X, LDO_VO3 (2,5 V) alimente le PHY MIPI D-PHY. Le pilote
+            esp_video l'active pendant la capture et le libère à sa fermeture ;
+            nid_power le coupe en plus juste avant la veille profonde, par sécurité
+            (un LDO resté actif augmente la consommation en veille). Les canaux de
+            la flash (1) et de la PSRAM (2) ne sont jamais coupés par nid_power.
 
     menu "Audio (codec ES8311)"
         config NID_PIN_I2S_MCLK
@@ -203,7 +232,10 @@ menu "Suivi nid — Carte et brochage"
             default 4
             help
                 Sur ESP32-P4, l'alimentation de la carte SD passe par le LDO
-                interne canal 4 (VO4) sur la P4X-Function-EV-Board.
+                interne canal 4 (VO4) sur la P4X-Function-EV-Board. VO4 alimente
+                tout le domaine d'E/S des GPIO 39 à 48 ; il doit être libéré au
+                démontage de la carte (consommation en veille) : nid_power le
+                coupe de toute façon juste avant la veille profonde.
         config NID_PIN_SD_CLK
             int "SD CLK"
             default 43

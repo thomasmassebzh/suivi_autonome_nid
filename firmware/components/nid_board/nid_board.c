@@ -1,15 +1,28 @@
 /*
  * nid_board — brochage et ressources partagées de la carte
+ *
+ * Maintien des broches (ESP-IDF v6.1, ESP32-P4 rév. ≥ 3.0) : gpio_hold_en()
+ * écrit LP_SYS.pad_rtc_hold_ctrl, dans le domaine basse consommation : chaque
+ * broche (0-54) garde son état pendant la veille profonde et APRÈS le réveil,
+ * jusqu'à gpio_hold_dis(). gpio_deep_sleep_hold_en() n'existe pas sur cette
+ * puce (SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP) et n'est pas nécessaire.
+ *
+ * Les sorties sont configurées par gpio_output_enable() plutôt que gpio_config() :
+ * pas de « réservation » de la broche, donc pas d'avertissement de conflit quand
+ * le pilote propriétaire la reprend (LEDC des LED IR, codec audio, ESP-Hosted).
  */
 #include "nid_board.h"
 
 #include "sdkconfig.h"
+#include "driver/rtc_io.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "nid_board";
+
+#define C6_RESET_PULSE_MS 10
 
 #define PIN_OR_NC(x) ((x) < 0 ? GPIO_NUM_NC : (gpio_num_t)(x))
 
@@ -69,23 +82,11 @@ const nid_board_pins_t *nid_board_pins(void)
     return &s_pins;
 }
 
-/* Configure une sortie et la place immédiatement à un niveau donné. */
-static void output_set(gpio_num_t pin, int level)
+/* Entrée de réveil : jamais pilotée ni maintenue en sortie par ce module. */
+static bool is_wake_input(gpio_num_t pin)
 {
-    if (pin == GPIO_NUM_NC) {
-        return;
-    }
-    gpio_hold_dis(pin);
-    gpio_set_level(pin, level);
-    gpio_config_t io = {
-        .pin_bit_mask = 1ULL << pin,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io);
-    gpio_set_level(pin, level);
+    return pin != GPIO_NUM_NC &&
+           (pin == s_pins.pir || pin == s_pins.button || pin == s_pins.rtc_int);
 }
 
 static int led_level(bool on)
@@ -93,17 +94,62 @@ static int led_level(bool on)
     return (on == s_pins.status_led_active_high) ? 1 : 0;
 }
 
+/*
+ * Sortie GPIO simple au niveau demandé, sans tirage. gpio_output_enable() rend
+ * aussi la broche au GPIO si un périphérique l'utilisait (signal LEDC des LED IR).
+ * Si la broche est maintenue, l'état n'atteint la broche qu'à la libération.
+ */
+static void drive_output(gpio_num_t pin, int level)
+{
+    if (rtc_gpio_is_valid_gpio(pin)) {
+        rtc_gpio_deinit(pin);  /* broche LP : retour au GPIO numérique */
+    }
+    gpio_set_level(pin, level);
+    gpio_output_enable(pin);
+    gpio_set_level(pin, level);
+    gpio_pullup_dis(pin);    /* un tirage opposé au niveau consommerait ~70 µA */
+    gpio_pulldown_dis(pin);
+}
+
+/* Démarrage : niveau de repos écrit pendant que la broche est encore maintenue, puis libération. */
+static void park_output(gpio_num_t pin, int level)
+{
+    if (pin == GPIO_NUM_NC || is_wake_input(pin)) {
+        return;
+    }
+    drive_output(pin, level);
+    gpio_hold_dis(pin);
+}
+
+/* Avant la veille : niveau de repos puis maintien. */
+static void hold_output(gpio_num_t pin, int level)
+{
+    if (pin == GPIO_NUM_NC || is_wake_input(pin)) {
+        return;
+    }
+    drive_output(pin, level);
+    gpio_hold_dis(pin);  /* un maintien antérieur figerait l'ancien état */
+    gpio_hold_en(pin);
+}
+
 esp_err_t nid_board_init_early(void)
 {
     /* Ordre : d'abord tout ce qui émet de la lumière ou du bruit (FC1.1, FC1.2). */
-    output_set(s_pins.ir_led, 0);
-    output_set(s_pins.status_led, led_level(false));
-    output_set(s_pins.lcd_backlight, 0);
-    output_set(s_pins.audio_pa, 0);
+    park_output(s_pins.ir_led, 0);
+    park_output(s_pins.status_led, led_level(false));
+    park_output(s_pins.lcd_backlight, 0);
+    park_output(s_pins.audio_pa, 0);
     /* Le C6 reste en reset tant que le mode installation ne le réveille pas (FC3.2). */
-    output_set(s_pins.c6_reset, 0);
-    /* Interrupteur d'alimentation : OFF au repos (niveau bas = pas de coupure). */
-    output_set(s_pins.power_off, 0);
+    park_output(s_pins.c6_reset, 0);
+    /* Interrupteur d'alimentation : OFF inactif (niveau bas = pas de coupure). */
+    park_output(s_pins.power_off, 0);
+    /* Entrées de réveil maintenues avant la veille (configurées ensuite par nid_detect). */
+    const gpio_num_t inputs[] = { s_pins.pir, s_pins.button, s_pins.rtc_int };
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        if (inputs[i] != GPIO_NUM_NC) {
+            gpio_hold_dis(inputs[i]);
+        }
+    }
     return ESP_OK;
 }
 
@@ -137,24 +183,25 @@ i2c_master_bus_handle_t nid_board_i2c_bus(void)
 
 esp_err_t nid_board_coproc_enable(bool enable)
 {
-    if (s_pins.c6_reset == GPIO_NUM_NC) {
+    const gpio_num_t pin = s_pins.c6_reset;
+    if (pin == GPIO_NUM_NC || is_wake_input(pin)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
-    gpio_hold_dis(s_pins.c6_reset);
+    /* Reset actif (niveau bas) ; reprend la broche même si ESP-Hosted l'a configurée. */
+    drive_output(pin, 0);
+    gpio_hold_dis(pin);
     if (enable) {
-        /* Impulsion de reset propre puis libération. */
-        gpio_set_level(s_pins.c6_reset, 0);
-        vTaskDelay(pdMS_TO_TICKS(10));
-        gpio_set_level(s_pins.c6_reset, 1);
-    } else {
-        gpio_set_level(s_pins.c6_reset, 0);
+        /* Impulsion de reset propre, puis reset relâché : sortie haute, non maintenue. */
+        vTaskDelay(pdMS_TO_TICKS(C6_RESET_PULSE_MS));
+        gpio_set_level(pin, 1);
     }
+    ESP_LOGI(TAG, "coprocesseur ESP32-C6 %s", enable ? "démarré" : "maintenu en reset");
     return ESP_OK;
 }
 
 void nid_board_status_led(bool on)
 {
-    if (s_pins.status_led == GPIO_NUM_NC) {
+    if (s_pins.status_led == GPIO_NUM_NC || is_wake_input(s_pins.status_led)) {
         return;
     }
     gpio_set_level(s_pins.status_led, led_level(on));
@@ -170,23 +217,14 @@ void nid_board_status_blink(int count, int on_ms, int off_ms)
     }
 }
 
-static void hold_low(gpio_num_t pin, int level)
-{
-    if (pin == GPIO_NUM_NC) {
-        return;
-    }
-    gpio_set_level(pin, level);
-    gpio_hold_en(pin);
-}
-
 void nid_board_prepare_deep_sleep(void)
 {
-    /* Sorties au repos, maintenues pendant la veille (ESP32-P4 rév. ≥ 3.0 :
-     * maintien individuel des broches en veille profonde). */
-    hold_low(s_pins.ir_led, 0);
-    hold_low(s_pins.status_led, led_level(false));
-    hold_low(s_pins.lcd_backlight, 0);
-    hold_low(s_pins.audio_pa, 0);
-    hold_low(s_pins.c6_reset, 0);
-    hold_low(s_pins.power_off, 0);
+    /* Sorties au repos et maintenues pendant la veille (maintien individuel des
+     * broches en veille profonde, ESP32-P4 rév. ≥ 3.0). */
+    hold_output(s_pins.ir_led, 0);
+    hold_output(s_pins.status_led, led_level(false));
+    hold_output(s_pins.lcd_backlight, 0);
+    hold_output(s_pins.audio_pa, 0);
+    hold_output(s_pins.c6_reset, 0);
+    hold_output(s_pins.power_off, 0);
 }
