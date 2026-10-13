@@ -112,6 +112,36 @@ void nid_capture_preview_release(void);
 
 esp_err_t nid_capture_preview_stop(void);
 
+/**
+ * Image remise au crochet de débogage : YUV 4:2:0 « Espressif » (O_UYY_E_VYY,
+ * format de l'ISP, voir nid_overlay.h), incrustation date/heure comprise.
+ */
+typedef struct {
+    const uint8_t *data;       /*!< image, en lecture seule, valide pendant l'appel seulement */
+    size_t   len;              /*!< octets utiles */
+    uint16_t width;
+    uint16_t height;
+    bool     full_range;       /*!< plage YUV pleine 0-255 (photo, aperçu), sinon limitée 16-235 (vidéo) */
+    bool     recording;        /*!< image d'un enregistrement en cours */
+} nid_capture_frame_t;
+
+typedef void (*nid_capture_frame_hook_t)(const nid_capture_frame_t *frame, void *arg);
+
+/**
+ * Crochet de débogage, pour le banc d'essai (écran local) ; le firmware de
+ * terrain ne l'utilise pas. Appelé avec chaque image capturée, une fois
+ * incrustée et encodée, par nid_capture_record(), nid_capture_photo() et
+ * nid_capture_preview_frame(), dans la tâche appelante et sous le verrou du
+ * module : le crochet ne doit appeler aucune fonction de nid_capture.
+ *
+ * Pendant un enregistrement, le temps passé dans le crochet retarde la lecture
+ * de l'image suivante (trois tampons caméra) : il doit rester bref (quelques ms)
+ * et sauter lui-même des images (quelques i/s suffisent à un écran de contrôle).
+ * NULL (par défaut) : désactivé, sans coût. Un appel déjà commencé peut se
+ * terminer après le retour de nid_capture_set_frame_hook(NULL, NULL).
+ */
+void nid_capture_set_frame_hook(nid_capture_frame_hook_t hook, void *arg);
+
 /** Arrête la caméra (capteur en veille si possible) et libère la mémoire. */
 esp_err_t nid_capture_deinit(void);
 

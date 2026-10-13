@@ -46,9 +46,12 @@
  * Plage YUV : limitée (16-235) pour la vidéo H.264, pleine (0-255) pour le
  * JPEG ; l'ISP est reconfiguré lors du passage de l'une à l'autre.
  *
- * Concurrence : toutes les fonctions publiques (sauf is_ready, sensor_name et
- * set_night) sont sérialisées par un mutex ; l'enregistrement le garde pendant
- * toute la séquence.
+ * Concurrence : toutes les fonctions publiques (sauf is_ready, sensor_name,
+ * set_night et set_frame_hook) sont sérialisées par un mutex ; l'enregistrement
+ * le garde pendant toute la séquence.
+ *
+ * Crochet de débogage (banc d'essai) : nid_capture_set_frame_hook() ; sans
+ * crochet (firmware de terrain), un test de pointeur nul par image.
  */
 #include "nid_capture.h"
 
@@ -207,6 +210,11 @@ static SemaphoreHandle_t s_ctrl_lock;       /* jour / nuit (ISP), indépendant d
 static StaticSemaphore_t s_ctrl_lock_buf;
 static SemaphoreHandle_t s_mux_lock;        /* multiplexeur : tâche vidéo et tâche audio */
 static StaticSemaphore_t s_mux_lock_buf;
+
+/* Crochet de débogage (banc d'essai), voir nid_capture_set_frame_hook(). */
+static nid_capture_frame_hook_t s_frame_hook;
+static void *s_frame_hook_arg;
+static portMUX_TYPE s_frame_hook_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void lock(void)
 {
@@ -843,6 +851,29 @@ static void overlays_invalidate(void)
     s_cap.ov_video.sec = (time_t)-1;
     s_cap.ov_photo.sec = (time_t)-1;
     s_cap.ov_preview.sec = (time_t)-1;
+}
+
+/** Remet l'image (incrustée, encodée) au crochet de débogage s'il y en a un. Sous verrou. */
+static void frame_hook(const uint8_t *data, size_t len, uint16_t w, uint16_t h, bool full_range, bool recording)
+{
+    if (s_frame_hook == NULL) {
+        return;     /* firmware de terrain */
+    }
+    portENTER_CRITICAL(&s_frame_hook_mux);
+    nid_capture_frame_hook_t hook = s_frame_hook;
+    void *arg = s_frame_hook_arg;
+    portEXIT_CRITICAL(&s_frame_hook_mux);
+    if (hook != NULL) {
+        const nid_capture_frame_t f = {
+            .data = data,
+            .len = len,
+            .width = w,
+            .height = h,
+            .full_range = full_range,
+            .recording = recording,
+        };
+        hook(&f, arg);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1534,6 +1565,9 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         overlay_apply(&s_cap.ov_video, frame);
         uint32_t enc_len = 0;
         err = m2m_encode(s_cap.h264_fd, frame, cb.bytesused, &enc_len);
+        if (err == ESP_OK) {
+            frame_hook(frame, cb.bytesused, s_cap.width, s_cap.height, false, true);
+        }
         cam_qbuf(cb.index);
         if (err != ESP_OK) {
             break;
@@ -1690,6 +1724,9 @@ static esp_err_t photo_locked(const char *path)
     overlay_apply(&s_cap.ov_photo, frame);
     uint32_t len = 0;
     err = m2m_encode(s_cap.jpeg_fd, frame, cb.bytesused, &len);
+    if (err == ESP_OK) {
+        frame_hook(frame, cb.bytesused, s_cap.width, s_cap.height, true, false);
+    }
     cam_qbuf(cb.index);
     cam_stop();
     if (err != ESP_OK) {
@@ -1785,9 +1822,15 @@ esp_err_t nid_capture_preview_frame(const uint8_t **jpeg, size_t *len, uint32_t 
             size_t used = (size_t)s_cap.pv_w * s_cap.pv_h * 3 / 2;
             esp_cache_msync(s_cap.pv_buf, s_cap.pv_buf_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
             err = m2m_encode(s_cap.jpeg_fd, s_cap.pv_buf, (uint32_t)used, &out_len);
+            if (err == ESP_OK) {
+                frame_hook(s_cap.pv_buf, used, s_cap.pv_w, s_cap.pv_h, true, false);
+            }
         } else {
             overlay_apply(&s_cap.ov_photo, frame);
             err = m2m_encode(s_cap.jpeg_fd, frame, cb.bytesused, &out_len);
+            if (err == ESP_OK) {
+                frame_hook(frame, cb.bytesused, s_cap.width, s_cap.height, true, false);
+            }
             cam_qbuf(cb.index);
         }
     }
@@ -1811,6 +1854,14 @@ void nid_capture_preview_release(void)
         s_cap.pv_held = false;
     }
     unlock();
+}
+
+void nid_capture_set_frame_hook(nid_capture_frame_hook_t hook, void *arg)
+{
+    portENTER_CRITICAL(&s_frame_hook_mux);
+    s_frame_hook = hook;
+    s_frame_hook_arg = arg;
+    portEXIT_CRITICAL(&s_frame_hook_mux);
 }
 
 esp_err_t nid_capture_preview_stop(void)
