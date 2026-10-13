@@ -68,13 +68,41 @@ CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
 # ----------------------------------------------------------------------------
 # Capteurs détectés automatiquement : OV5647 (caméra IR-cut Waveshare / Arducam)
 # et SC2336 (caméra 2 MP fournie avec la carte, pour le banc d'essai).
+# Options reprises des exemples esp_video (image_storage/sd_card, capture_stream).
+#
+# Formats capteur compilés (nid_capture choisit à l'exécution celui qui
+# correspond à la résolution réglée, VIDIOC_S_SENSOR_FMT) :
+#   1920x1080 : OV5647 RAW10 30 i/s     | SC2336 RAW10 30 i/s
+#   1280x960  : OV5647 RAW10 45 i/s     | SC2336 1920x1080 recadré par l'ISP
+#   1280x720  : OV5647 1280x960 recadré | SC2336 RAW8 30 i/s
 CONFIG_CAMERA_OV5647=y
+# CONFIG_CAMERA_OV5647_MIPI_RAW8_800X800_50FPS is not set
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1920X1080_30FPS=y
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS=y
+CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y
 CONFIG_CAMERA_SC2336=y
+CONFIG_CAMERA_SC2336_MIPI_RAW10_1920X1080_30FPS=y
+CONFIG_CAMERA_SC2336_MIPI_RAW8_1280X720_30FPS=y
+CONFIG_CAMERA_SC2336_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y
+# Caméras MIPI-CSI uniquement : pas de détection sur le port DVP.
+# CONFIG_CAMERA_SC2336_AUTO_DETECT_DVP_INTERFACE_SENSOR is not set
+# CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE is not set
+# Exposition et balance des blancs automatiques (contrôleur de l'ISP + esp_ipa)
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+# Encodeurs matériels mémoire à mémoire : H.264 (vidéo) et JPEG (photo, aperçu)
+CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE=y
+# Multiplexeur MP4 d'esp_muxer (vidéo H.264 + son AAC)
+CONFIG_ESP_MUXER_MP4_SUPPORT=y
 
 # ----------------------------------------------------------------------------
 # Audio (codec ES8311)
 # ----------------------------------------------------------------------------
+# Micro de la carte via le codec ES8311 (esp_codec_dev), encodage AAC
+# (esp_audio_codec) pour la piste son du MP4. L'ampli NS4150B n'est jamais activé.
+CONFIG_CODEC_ES8311_SUPPORT=y
+CONFIG_AUDIO_ENCODER_AAC_SUPPORT=y
 
 # ----------------------------------------------------------------------------
 # Wi-Fi d'installation via le coprocesseur ESP32-C6 (ESP-Hosted, SDIO)

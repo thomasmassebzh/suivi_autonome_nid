@@ -1,0 +1,62 @@
+Avis de licence des exemples Espressif adaptés dans nid_capture
+================================================================
+
+nid_capture.c et nid_capture_audio.c reprennent des motifs de code des exemples
+et applications de test suivants (voir les en-têtes des fichiers) :
+
+- esp_video 2.5.0 : examples/image_storage/sd_card, examples/capture_stream,
+  examples/common_components/example_video_common
+  (ESPRESSIF MIT License, texte ci-dessous) ;
+- esp_muxer 1.2.3 : examples/video_muxer (Apache-2.0) et test_apps/muxer_test
+  (Espressif Modified MIT License, texte ci-dessous) ;
+- esp_codec_dev : test_apps/codec_dev_test (Apache-2.0).
+
+Le code adapté n'est utilisé qu'avec une puce Espressif (ESP32-P4).
+
+-----------------------------------------------------------------------------
+
+ ESPRESSIF MIT License
+
+ Copyright (c) 2024 <ESPRESSIF SYSTEMS (SHANGHAI) PTE LTD>
+
+ Permission is hereby granted for use on all ESPRESSIF SYSTEMS products, in which case,
+ it is free of charge, to any person obtaining a copy of this software and associated
+ documentation files (the "Software"), to deal in the Software without restriction, including
+ without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the Software is furnished
+ to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in all copies or
+ substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+-----------------------------------------------------------------------------
+
+Espressif Modified MIT License
+
+Copyright (c) 2026 Espressif Systems (Shanghai) CO., LTD
+
+Permission is hereby granted for use EXCLUSIVELY with Espressif Systems products.
+This includes the right to use, copy, modify, merge, publish, distribute, and sublicense
+the Software, subject to the following conditions:
+
+1. This Software MUST BE USED IN CONJUNCTION WITH ESPRESSIF SYSTEMS PRODUCTS.
+2. The above copyright notice and this permission notice shall be included in all copies
+   or substantial portions of the Software.
+3. Redistribution of the Software in source or binary form FOR USE WITH NON-ESPRESSIF PRODUCTS
+   is strictly prohibited.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+SPDX-License-Identifier: LicenseRef-Espressif-Modified-MIT
