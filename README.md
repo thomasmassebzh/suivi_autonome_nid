@@ -72,6 +72,7 @@ firmware/                 projet ESP-IDF (à ouvrir dans VS Code)
 └── components/           modules du firmware (un dossier par module, voir Architecture)
 banc_essai/               projet ESP-IDF séparé pour les essais sur la carte (écran, bouton BOOT, console)
 docs/essais_sur_carte.md  démarche de test pas à pas
+docs/revue_cdcf.md        relecture du code par rapport au cahier des charges (défauts à corriger)
 ```
 
 ---
