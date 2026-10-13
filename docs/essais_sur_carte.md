@@ -75,6 +75,10 @@ BOOT, puis relancer le flash.
 ## Étape 2 — `peripherals/i2c/i2c_tools`
 
 Valide : le bus I2C partagé (caméra, codec ES8311, écran tactile, plus tard l'horloge DS3231).
+**Réglage obligatoire** : `SDK Configuration Editor` › rechercher *Channel for console output*
+(menu *ESP-STDIO*) › **USB Serial/JTAG Controller**. La P4X n'a pas de convertisseur USB-série : par
+défaut la console attend les commandes sur l'UART0 (GPIO37/38) et ce qui est tapé dans le moniteur
+ne serait pas reçu.
 Dans le moniteur, au prompt `i2c-tools>` :
 
 ```text
@@ -98,7 +102,9 @@ puis écriture et relecture d'un fichier.
 
 ## Étape 4 — `peripherals/lcd/mipi_dsi`
 
-Valide : écran, nappe, fils RST/PWM. Écran **EK79007** (choix par défaut, 1024×600). Résultat
+Valide : écran, nappe, fils RST/PWM. L'exemple ne commande ni le rétroéclairage ni le reset : dans
+`main/mipi_dsi_lcd_example_main.c`, passer `EXAMPLE_PIN_NUM_BK_LIGHT` de `-1` à **`26`** et
+`EXAMPLE_PIN_NUM_LCD_RST` de `-1` à **`27`**. Écran **EK79007** (choix par défaut, 1024×600). Résultat
 attendu : un widget LVGL s'affiche. Écran noir : vérifier le fil GPIO26 → PWM (rétroéclairage) et
 l'alimentation 5 V de l'adaptateur ; écran allumé mais vide : fil GPIO27 → RST_LCD, sens de la nappe.
 
@@ -107,7 +113,9 @@ l'alimentation 5 V de l'adaptateur ; écran allumé mais vide : fil GPIO27 → R
 Valide : caméra → ISP → écran, sans la bibliothèque `esp_video`. Dans `SDK Configuration Editor`,
 activer le capteur : `CONFIG_CAMERA_SC2336` (caméra du kit) ou `CONFIG_CAMERA_OV5647`. Résultat
 attendu : image en direct à l'écran et, dans le moniteur, `Detected Camera sensor PID=...`.
-L'image n'est pas réglée (couleurs, netteté) : seul le fonctionnement compte ici.
+L'image n'est pas réglée (couleurs, netteté) : seul le fonctionnement compte ici. Cet exemple ne
+commande pas le rétroéclairage : si l'écran reste noir alors que l'étape 4 marchait, brancher pour
+l'essai le fil `PWM` de J6 sur une broche 3V3 de J1 au lieu de GPIO26, puis le remettre.
 
 ## Étape 6 — exemples `esp_video` (bibliothèque utilisée par notre module `nid_capture`)
 
