@@ -34,6 +34,10 @@ Rien n'a encore été essayé sur la carte : seule la compilation est vérifiée
 n'est pas fait, l'heure n'est pas conservée en cas de coupure d'alimentation (elle se règle
 depuis la page web d'installation).
 
+**Premiers essais sur la carte** : suivre le guide pas à pas [docs/essais_sur_carte.md](docs/essais_sur_carte.md)
+(exemples Espressif d'abord, puis le [banc d'essai](banc_essai/README.md) : vidéo sur appui du bouton
+BOOT, avec l'écran 7" de la carte pour le contrôle).
+
 > Sommaire : [Matériel](#matériel) · [Installer l'environnement](#1-installer-lenvironnement) ·
 > [Ouvrir le projet](#2-ouvrir-le-projet) · [Cible et configuration](#3-choisir-la-cible-et-configurer) ·
 > [Compiler](#4-compiler) · [Flasher](#5-flasher) · [Moniteur série](#6-moniteur-série) ·
@@ -66,6 +70,8 @@ firmware/                 projet ESP-IDF (à ouvrir dans VS Code)
 ├── partitions.csv        table des partitions (flash 16 Mo)
 ├── main/                 logique de l'application (réveil → action → veille)
 └── components/           modules du firmware (un dossier par module, voir Architecture)
+banc_essai/               projet ESP-IDF séparé pour les essais sur la carte (écran, bouton BOOT, console)
+docs/essais_sur_carte.md  démarche de test pas à pas
 ```
 
 ---
