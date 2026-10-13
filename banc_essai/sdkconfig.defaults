@@ -1,0 +1,85 @@
+# Valeurs par défaut du banc d'essai — ESP32-P4X-Function-EV-Board
+#
+# Reprend de firmware/sdkconfig.defaults les sections puce, flash, PSRAM,
+# carte SD, caméra et audio (le banc teste le même chemin que le firmware de
+# terrain), sans la veille profonde ni le Wi-Fi. Fichier lu à la création de
+# `sdkconfig` (première compilation, ou après « ESP-IDF: Full Clean »).
+# Réglages propres au banc : menu « Banc d'essai » (SDK Configuration Editor).
+
+# ----------------------------------------------------------------------------
+# Puce, flash, mémoire (identique au firmware)
+# ----------------------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32p4"
+# Carte P4X : puce rév. ≥ 3.1. Ne PAS cocher ESP32P4_SELECTS_REV_LESS_V3 :
+# les binaires rév. 1.x et 3.x ne sont pas compatibles.
+CONFIG_ESP32P4_REV_MIN_301=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM 32 Mo (tampons image, encodeurs, tampon de l'écran)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# ----------------------------------------------------------------------------
+# FreeRTOS, journal
+# ----------------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# Comme le firmware : chargeur d'amorçage plus petit (il doit tenir dans 0x6000
+# octets avant la table des partitions, à 0x8000).
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# ----------------------------------------------------------------------------
+# Console série (propre au banc)
+# ----------------------------------------------------------------------------
+# La P4X n'a pas de convertisseur USB-série : la console interactive (commandes
+# video, photo, info...) passe par le port « USB Serial/JTAG » de la carte,
+# celui qui sert à flasher. Une console secondaire ne recevrait pas les commandes.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ----------------------------------------------------------------------------
+# Carte microSD / FAT (identique au firmware)
+# ----------------------------------------------------------------------------
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+
+# ----------------------------------------------------------------------------
+# Caméra et vidéo (esp_video / esp_cam_sensor), identique au firmware
+# ----------------------------------------------------------------------------
+# OV5647 (caméra IR-cut) et SC2336 (caméra 2 MP du kit) détectées automatiquement.
+#   1920x1080 : OV5647 RAW10 30 i/s     | SC2336 RAW10 30 i/s
+#   1280x960  : OV5647 RAW10 45 i/s     | SC2336 1920x1080 recadré par l'ISP
+#   1280x720  : OV5647 1280x960 recadré | SC2336 RAW8 30 i/s
+CONFIG_CAMERA_OV5647=y
+# CONFIG_CAMERA_OV5647_MIPI_RAW8_800X800_50FPS is not set
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1920X1080_30FPS=y
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS=y
+CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y
+CONFIG_CAMERA_SC2336=y
+CONFIG_CAMERA_SC2336_MIPI_RAW10_1920X1080_30FPS=y
+CONFIG_CAMERA_SC2336_MIPI_RAW8_1280X720_30FPS=y
+CONFIG_CAMERA_SC2336_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y
+# CONFIG_CAMERA_SC2336_AUTO_DETECT_DVP_INTERFACE_SENSOR is not set
+# CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE is not set
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE=y
+CONFIG_ESP_MUXER_MP4_SUPPORT=y
+
+# ----------------------------------------------------------------------------
+# Audio (codec ES8311), identique au firmware
+# ----------------------------------------------------------------------------
+CONFIG_CODEC_ES8311_SUPPORT=y
+CONFIG_AUDIO_ENCODER_AAC_SUPPORT=y

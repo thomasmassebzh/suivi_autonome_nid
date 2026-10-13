@@ -1,0 +1,9 @@
+## Banc d'essai : pilotes des écrans MIPI-DSI de la carte, sans le BSP ni LVGL
+## (le BSP esp32_p4_function_ev_board impose esp_video ~2.0 et esp_codec_dev ~1.5,
+## incompatibles avec les versions figées du firmware). Les dépendances de la
+## caméra et du son sont déclarées par firmware/components/nid_capture.
+## Après la première compilation réussie, versionner banc_essai/dependencies.lock.
+dependencies:
+  idf: ">=6.1"
+  espressif/esp_lcd_ek79007: "^2.0.1"
+  espressif/esp_lcd_ili9881c: "^1.0.3"

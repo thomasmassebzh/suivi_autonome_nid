@@ -1,0 +1,122 @@
+menu "Banc d'essai"
+
+    comment "Enregistrement (bouton BOOT ou commande « video » de la console)"
+
+    config BANC_BOUTON_GPIO
+        int "GPIO du bouton d'enregistrement (actif bas)"
+        range 0 54
+        default 35
+        help
+            Bouton BOOT de l'ESP32-P4X-Function-EV-Board (GPIO35, vers la masse,
+            résistance de rappel sur la carte). Un appui démarre un enregistrement ;
+            un appui pendant l'enregistrement l'arrête (fichier fermé proprement).
+            Maintenir BOOT pendant un appui sur RESET passe toujours la carte en
+            mode téléchargement.
+
+    config BANC_DUREE_S
+        int "Durée d'un enregistrement (s)"
+        range 1 300
+        default 10
+
+    choice BANC_RESOLUTION
+        prompt "Résolution vidéo"
+        default BANC_RES_1920X1080
+        help
+            Mêmes valeurs que « resolution » dans config.ini du firmware. Le format
+            du capteur est choisi automatiquement (voir sdkconfig.defaults).
+
+        config BANC_RES_1920X1080
+            bool "1920x1080"
+        config BANC_RES_1280X960
+            bool "1280x960"
+        config BANC_RES_1280X720
+            bool "1280x720"
+    endchoice
+
+    config BANC_LARGEUR
+        int
+        default 1920 if BANC_RES_1920X1080
+        default 1280
+
+    config BANC_HAUTEUR
+        int
+        default 1080 if BANC_RES_1920X1080
+        default 960 if BANC_RES_1280X960
+        default 720
+
+    config BANC_IPS
+        int "Images par seconde"
+        range 1 60
+        default 30
+        help
+            Cadence effective : plus grand diviseur de la cadence du capteur ne
+            dépassant pas cette valeur (capteur à 30 i/s : 30, 15, 10...).
+
+    config BANC_DEBIT_KBPS
+        int "Débit vidéo H.264 (kbit/s)"
+        range 100 25000
+        default 4000
+
+    config BANC_SON
+        bool "Piste son (micro de la carte, AAC)"
+        default y
+
+    config BANC_QUALITE_JPEG
+        int "Qualité des photos JPEG (commande « photo »)"
+        range 10 100
+        default 80
+
+    config BANC_FUSEAU
+        string "Fuseau horaire (format TZ POSIX)"
+        default "CET-1CEST,M3.5.0,M10.5.0/3"
+        help
+            Heure locale de l'incrustation, des noms de fichiers et du journal.
+            France métropolitaine par défaut ; Martinique : AST4.
+
+    comment "Écran (débogage)"
+
+    choice BANC_ECRAN
+        prompt "Écran"
+        default BANC_ECRAN_EK79007
+        help
+            Écran MIPI-DSI relié au connecteur DSI de la carte (nappe « inversée »
+            du kit). Sans écran, le banc reste utilisable par le bouton et la console.
+
+        config BANC_ECRAN_EK79007
+            bool "7 pouces 1024x600 du kit (EK79007)"
+        config BANC_ECRAN_ILI9881C
+            bool "800x1280 (ILI9881C)"
+        config BANC_ECRAN_AUCUN
+            bool "Aucun"
+    endchoice
+
+    config BANC_ECRAN_RETRO_GPIO
+        int "GPIO du rétroéclairage (broche PWM de l'adaptateur ; -1 = aucun)"
+        range -1 54
+        default 26 if BANC_ECRAN_EK79007
+        default 23
+        depends on !BANC_ECRAN_AUCUN
+
+    config BANC_ECRAN_RESET_GPIO
+        int "GPIO de reset de l'écran (broche RST_LCD de l'adaptateur ; -1 = aucun)"
+        range -1 54
+        default 27 if BANC_ECRAN_EK79007
+        default -1
+        depends on !BANC_ECRAN_AUCUN
+
+    config BANC_VUE_ENREG
+        bool "Vue caméra pendant l'enregistrement"
+        default y
+        depends on !BANC_ECRAN_AUCUN
+        help
+            Affiche quelques images par seconde pendant l'enregistrement (les
+            autres sont sautées). Désactiver pour vérifier que l'affichage ne fait
+            pas perdre d'images (comparer « perdues » dans le bilan).
+
+    config BANC_VUE_ENREG_IPS
+        int "Images affichées par seconde pendant l'enregistrement"
+        range 1 10
+        default 3
+        depends on BANC_VUE_ENREG
+
+endmenu
