@@ -26,12 +26,13 @@ versions figées des composants). Modules :
 | `nid_config` | fait : lecture et écriture de `config.ini` |
 | `nid_ir` | fait : LED 940 nm, filtre IR-cut, lever/coucher du soleil, avec tests sur PC (`make -C firmware/components/nid_ir/test_host`) |
 | `nid_install` | fait : Wi-Fi via le C6, page web (aperçu, réglages, heure, maintenance) — à valider sur la carte |
-| `nid_capture` | **à terminer** : police et incrustation date/heure faites (`nid_overlay.c`) ; reste la chaîne caméra → H.264 → MP4 + son AAC, la photo JPEG et l'aperçu |
+| `nid_capture` | fait, d'après les exemples Espressif (`esp_video` sd_card, `esp_muxer` video_muxer) : OV5647 / SC2336 détectées, date/heure incrustée, H.264 matériel + son AAC (ES8311) en MP4, photo et aperçu JPEG, mode nuit monochrome — **à valider sur la carte** (recadrages ISP, lecture des MP4, synchro son/image) |
 | `nid_storage` | fait : montage de la carte SD (LDO interne), nommage, écriture sécurisée `.tmp` → nom final, récupération `_INCOMPLET`, journal CSV |
 | `nid_clock` | **à faire** : pilote DS3231/DS1307 (interface définie, fonctions provisoires) |
 
-Tant que la capture n'est pas terminée, le système démarre, dort, se réveille et tient son
-journal, mais n'enregistre ni vidéo ni photo.
+Rien n'a encore été essayé sur la carte : seule la compilation est vérifiée. Tant que `nid_clock`
+n'est pas fait, l'heure n'est pas conservée en cas de coupure d'alimentation (elle se règle
+depuis la page web d'installation).
 
 > Sommaire : [Matériel](#matériel) · [Installer l'environnement](#1-installer-lenvironnement) ·
 > [Ouvrir le projet](#2-ouvrir-le-projet) · [Cible et configuration](#3-choisir-la-cible-et-configurer) ·
