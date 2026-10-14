@@ -40,6 +40,7 @@ static esp_timer_handle_t s_btn_timer;
 static volatile bool s_btn_pending;
 static bool s_isr_service_ready;
 static bool s_events_on;
+static volatile int64_t s_pir_edge_us;   /* instant du dernier front actif (mode banc) */
 
 static TickType_t ticks_ms(uint32_t ms)
 {
@@ -219,6 +220,7 @@ static void IRAM_ATTR pir_isr(void *arg)
     if (q == NULL) {
         return;
     }
+    s_pir_edge_us = esp_timer_get_time();
     const nid_detect_evt_t evt = NID_DETECT_EVT_PIR;
     BaseType_t woken = pdFALSE;
     xQueueSendFromISR(q, &evt, &woken);
@@ -303,6 +305,11 @@ esp_err_t nid_detect_enable_events(QueueHandle_t queue)
     }
     ESP_LOGI(TAG, "événements actifs : PIR GPIO%d, bouton GPIO%d", s_pir, s_button);
     return ESP_OK;
+}
+
+int64_t nid_detect_last_pir_edge_us(void)
+{
+    return s_pir_edge_us;
 }
 
 void nid_detect_disable_events(void)

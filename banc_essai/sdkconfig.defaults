@@ -53,6 +53,10 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_API_ENCODING_UTF_8=y
 CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+# Points de montage VFS : la carte SD, la console, et un par périphérique
+# d'esp_video (caméra, ISP, encodeurs H.264 et JPEG : /dev/video0, 10, 11...).
+# Avec 8 (défaut), « Failed to register video VFS dev name=video10 ».
+CONFIG_VFS_MAX_COUNT=16
 
 # ----------------------------------------------------------------------------
 # Caméra et vidéo (esp_video / esp_cam_sensor), identique au firmware

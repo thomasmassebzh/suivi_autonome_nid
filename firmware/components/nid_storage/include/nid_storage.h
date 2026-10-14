@@ -37,8 +37,30 @@ esp_err_t nid_storage_unmount(void);
 
 bool nid_storage_is_mounted(void);
 
-/** Capacité totale et espace libre en octets. */
+/**
+ * Capacité totale et espace libre du volume FAT monté, en octets (calcul 64 bits :
+ * grappes × secteurs par grappe × taille de secteur). L'espace libre vient du
+ * compteur FSINFO de la carte s'il est vraisemblable (lecture immédiate).
+ */
 esp_err_t nid_storage_get_space(uint64_t *total_bytes, uint64_t *free_bytes);
+
+/** Description du volume FAT monté (diagnostic, banc d'essai). */
+typedef struct {
+    uint64_t card_bytes;       /*!< capacité de la carte (registre CSD) */
+    uint64_t volume_bytes;     /*!< zone de données du volume FAT monté */
+    uint64_t free_bytes;       /*!< espace libre */
+    uint32_t cluster_bytes;    /*!< taille d'une grappe (« taille d'unité d'allocation ») */
+    uint32_t first_sector;     /*!< premier secteur du volume (0 : carte sans table de partitions) */
+    uint8_t  fat_type;         /*!< 12, 16 ou 32 */
+} nid_storage_volume_t;
+
+/**
+ * Décrit le volume monté. full_scan : recompte les grappes libres dans la FAT
+ * (quelques secondes sur une grande carte) au lieu de se fier au compteur
+ * FSINFO, et corrige ce compteur sur la carte. Banc d'essai : à n'appeler
+ * qu'en l'absence d'écriture en cours.
+ */
+esp_err_t nid_storage_get_volume(nid_storage_volume_t *out, bool full_scan);
 
 /**
  * Définit les identifiants système/nid (assainis) utilisés dans les noms et

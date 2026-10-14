@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "nid_capture.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +25,7 @@ typedef struct {
     uint8_t        channels;         /*!< nombre de voies */
     uint8_t        bits_per_sample;  /*!< bits par échantillon */
     uint32_t       frame_ms;         /*!< durée d'une trame AAC (ms, arrondie) */
-    const uint8_t *spec_info;        /*!< AudioSpecificConfig, valide jusqu'à nid_capture_audio_stop() */
+    const uint8_t *spec_info;        /*!< AudioSpecificConfig (calculée, 2 octets), valide jusqu'à nid_capture_audio_stop() */
     uint32_t       spec_info_len;
 } nid_capture_audio_info_t;
 
@@ -48,6 +49,15 @@ void nid_capture_audio_deliver(int64_t t0_us);
 
 /** Arrête la tâche, ferme le micro et l'encodeur. @return nombre de trames AAC remises. */
 uint32_t nid_capture_audio_stop(void);
+
+/**
+ * Vumètre (banc d'essai) : ouvre le micro, mesure le niveau pendant
+ * duration_ms, le referme. ESP_ERR_INVALID_STATE pendant une séquence.
+ */
+esp_err_t nid_capture_audio_measure(uint32_t duration_ms, nid_capture_audio_level_t *out);
+
+/** Niveau du dernier bloc lu (séquence ou mesure) ; false si aucun depuis 1 s. */
+bool nid_capture_audio_get_last_level(nid_capture_audio_level_t *out);
 
 /** Libère le codec et le canal I2S (l'ampli du haut-parleur n'est jamais piloté). */
 void nid_capture_audio_deinit(void);

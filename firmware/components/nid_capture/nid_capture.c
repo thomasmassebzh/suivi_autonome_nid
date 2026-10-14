@@ -84,6 +84,7 @@
 #include "mp4_muxer.h"
 
 #include "nid_board.h"
+#include "nid_capture_calc.h"
 #include "nid_capture_priv.h"
 #include "nid_overlay.h"
 
@@ -1526,6 +1527,8 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     int64_t last_frame = t_begin;
     int64_t t0 = 0;
     int64_t prev_slot = -1;
+    int64_t qbuf_us[CAM_BUF_COUNT];     /* instants des CAM_BUF_COUNT dernières remises (QBUF) */
+    uint32_t n_qbuf = 0;
     uint32_t last_pts = 0;
     int skip = SKIP_STARTUP_FRAME_COUNT;
     bool stalled = false;
@@ -1549,14 +1552,21 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         }
 
         struct v4l2_buffer cb;
+        const int64_t t_call = esp_timer_get_time();
         if (cam_dqbuf(&cb, CAM_DQBUF_TIMEOUT_MS) != ESP_OK) {
             continue;
         }
         int64_t t = esp_timer_get_time();
+        /* Image fraîche si DQBUF l'a attendue ; sinon elle attendait déjà dans la file. */
+        const bool fresh = nid_capture_frame_is_fresh(t - t_call, frame_us);
+        /* Remise du tampon de l'image k - CAM_BUF_COUNT : l'image k est capturée après. */
+        const bool have_release = n_qbuf >= CAM_BUF_COUNT;
+        const int64_t release_us = have_release ? qbuf_us[n_qbuf % CAM_BUF_COUNT] : 0;
         last_frame = t;
         if (skip > 0) {
             skip--;
             cam_qbuf(cb.index);
+            qbuf_us[n_qbuf++ % CAM_BUF_COUNT] = esp_timer_get_time();
             continue;
         }
 
@@ -1569,6 +1579,7 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
             frame_hook(frame, cb.bytesused, s_cap.width, s_cap.height, false, true);
         }
         cam_qbuf(cb.index);
+        qbuf_us[n_qbuf++ % CAM_BUF_COUNT] = esp_timer_get_time();
         if (err != ESP_OK) {
             break;
         }
@@ -1586,11 +1597,11 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
             }
         }
 
-        /* Horodatage sur la grille des images : les trous comptent comme images perdues. */
-        int64_t slot = (t - t0 + frame_us / 2) / frame_us;
-        if (slot <= prev_slot) {
-            slot = prev_slot + 1;
-        }
+        /* Horodatage sur la grille des images : créneau recalculé sur l'heure d'arrivée
+         * seulement pour une image fraîche, sinon créneau suivant, borné par la remise
+         * du tampon (nid_capture_calc.h). Les trous de la grille comptent comme images perdues. */
+        const int64_t slot = nid_capture_next_slot(prev_slot, t - t0, frame_us, fresh,
+                                                   have_release ? release_us - t0 : NID_SLOT_NO_RELEASE);
         if (prev_slot >= 0 && slot > prev_slot + 1) {
             st->dropped_frames += (uint32_t)(slot - prev_slot - 1);
         }
@@ -1854,6 +1865,26 @@ void nid_capture_preview_release(void)
         s_cap.pv_held = false;
     }
     unlock();
+}
+
+esp_err_t nid_capture_audio_level(uint32_t duration_ms, nid_capture_audio_level_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "paramètre absent");
+    if (s_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    esp_err_t err = !s_cap.ready ? ESP_ERR_INVALID_STATE : (s_cap.audio_ok ? ESP_OK : ESP_ERR_NOT_SUPPORTED);
+    if (err == ESP_OK) {
+        err = nid_capture_audio_measure(duration_ms, out);
+    }
+    unlock();
+    return err;
+}
+
+bool nid_capture_audio_last_level(nid_capture_audio_level_t *out)
+{
+    return nid_capture_audio_get_last_level(out);
 }
 
 void nid_capture_set_frame_hook(nid_capture_frame_hook_t hook, void *arg)

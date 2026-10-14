@@ -82,6 +82,13 @@ typedef enum {
  */
 esp_err_t nid_detect_enable_events(QueueHandle_t queue);
 
+/**
+ * Mode banc : instant (esp_timer, µs) du dernier front actif du PIR relevé par
+ * l'interruption de nid_detect_enable_events() ; 0 si aucun. Sert à mesurer le
+ * délai entre la détection et la première image (FP1.4).
+ */
+int64_t nid_detect_last_pir_edge_us(void);
+
 /** Désactive les interruptions installées par nid_detect_enable_events() (le service GPIO reste installé). */
 void nid_detect_disable_events(void);
 

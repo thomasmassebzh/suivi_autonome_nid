@@ -33,11 +33,14 @@
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
+#include "diskio_sdmmc.h"
 #include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nid_board.h"
+#include "nid_storage_calc.h"
 
 static const char *TAG = "nid_storage";
 
@@ -161,6 +164,8 @@ static void sanitize_id(char *out, size_t out_size, const char *in, const char *
     }
 }
 
+static void log_volume(void);
+
 static void release_power(void)
 {
     if (s_pwr_handle != NULL) {
@@ -223,6 +228,7 @@ static esp_err_t mount_card(void)
     ESP_LOGI(TAG, "carte SD montée : %llu Mo, bus %d bit(s), %d kHz",
              (unsigned long long)((uint64_t)s_card->csd.capacity * (uint64_t)s_card->csd.sector_size / (1024 * 1024)),
              slot.width, s_card->real_freq_khz);
+    log_volume();
 
     /* Identifiants déjà connus (remontage après une pause) : la carte a pu être remplacée. */
     char base[BASE_DIR_MAX];
@@ -266,25 +272,87 @@ bool nid_storage_is_mounted(void)
     return s_mounted;
 }
 
+/**
+ * Volume FAT de la carte (verrou fichiers pris, carte montée) : f_getfree sur le
+ * lecteur de la carte, tailles calculées en 64 bits (nid_storage_calc.h).
+ */
+static esp_err_t read_volume(nid_storage_volume_t *v, bool full_scan)
+{
+    memset(v, 0, sizeof(*v));
+    if (!s_mounted || s_card == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const BYTE pdrv = ff_diskio_get_pdrv_card(s_card);
+    if (pdrv == 0xFF) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const char drv[3] = { (char)('0' + pdrv), ':', '\0' };
+    FATFS *fs = NULL;
+    DWORD free_clst = 0;
+    FRESULT res = f_getfree(drv, &free_clst, &fs);
+    if (res == FR_OK && full_scan) {
+        /* Compteur FSINFO ignoré : recomptage complet de la FAT (corrige aussi FSINFO). */
+        fs->free_clst = 0xFFFFFFFF;
+        res = f_getfree(drv, &free_clst, &fs);
+    }
+    if (res != FR_OK || fs == NULL) {
+        ESP_LOGE(TAG, "lecture de l'espace libre impossible (FatFs %d)", (int)res);
+        return ESP_FAIL;
+    }
+#if FF_MAX_SS != FF_MIN_SS
+    const uint32_t sector_size = fs->ssize;
+#else
+    const uint32_t sector_size = FF_MIN_SS;
+#endif
+    v->volume_bytes = nid_fat_bytes(nid_fat_clusters(fs->n_fatent), fs->csize, sector_size);
+    v->free_bytes = nid_fat_bytes(free_clst, fs->csize, sector_size);
+    v->cluster_bytes = (uint32_t)fs->csize * sector_size;
+    v->first_sector = (uint32_t)fs->volbase;
+    v->fat_type = fs->fs_type == FS_FAT32 ? 32 : (fs->fs_type == FS_FAT16 ? 16 : 12);
+    v->card_bytes = (uint64_t)s_card->csd.capacity * (uint64_t)s_card->csd.sector_size;
+    return ESP_OK;
+}
+
+esp_err_t nid_storage_get_volume(nid_storage_volume_t *out, bool full_scan)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    SemaphoreHandle_t lock = fs_lock();
+    xSemaphoreTake(lock, portMAX_DELAY);
+    const esp_err_t err = read_volume(out, full_scan);
+    xSemaphoreGive(lock);
+    return err;
+}
+
 esp_err_t nid_storage_get_space(uint64_t *total_bytes, uint64_t *free_bytes)
 {
-    uint64_t total = 0;
-    uint64_t free_b = 0;
-    esp_err_t err = ESP_ERR_INVALID_STATE;
-    if (s_mounted) {
-        err = esp_vfs_fat_info(NID_SD_MOUNT_POINT, &total, &free_b);
-        if (err != ESP_OK) {
-            total = 0;
-            free_b = 0;
-        }
-    }
+    nid_storage_volume_t v;
+    const esp_err_t err = nid_storage_get_volume(&v, false);
     if (total_bytes != NULL) {
-        *total_bytes = total;
+        *total_bytes = v.volume_bytes;
     }
     if (free_bytes != NULL) {
-        *free_bytes = free_b;
+        *free_bytes = v.free_bytes;
     }
     return err;
+}
+
+/** Journal série du volume monté ; alerte si le volume FAT ne couvre pas la carte. */
+static void log_volume(void)
+{
+    nid_storage_volume_t v;
+    if (read_volume(&v, false) != ESP_OK) {
+        return;
+    }
+    ESP_LOGI(TAG, "volume FAT%u : %" PRIu64 " Mo dont %" PRIu64 " Mo libres, grappes de %" PRIu32 " ko, "
+             "début secteur %" PRIu32 " ; carte %" PRIu64 " Mo", v.fat_type, v.volume_bytes / 1000000ULL,
+             v.free_bytes / 1000000ULL, v.cluster_bytes / 1024u, v.first_sector, v.card_bytes / 1000000ULL);
+    if (nid_fat_volume_too_small(v.volume_bytes, v.card_bytes)) {
+        ESP_LOGW(TAG, "le volume FAT monté (%" PRIu64 " Mo) ne couvre qu'une partie de la carte (%" PRIu64 " Mo) : "
+                 "carte à plusieurs partitions (seule la première partition FAT est utilisée) ? "
+                 "La reformater en une seule partition FAT32", v.volume_bytes / 1000000ULL, v.card_bytes / 1000000ULL);
+    }
 }
 
 /* ------------------------------------------------------------------------- */

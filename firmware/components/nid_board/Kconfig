@@ -108,6 +108,10 @@ menu "Suivi nid — Carte et brochage"
         help
             Pont diviseur depuis la batterie (ex. 100 kΩ / 100 kΩ). Sans mesure,
             l'arrêt propre sur seuil bas (FC3.4) n'est pas assuré par le logiciel.
+            Une tension invraisemblable (moins de 2500 mV ou plus de 20 V après
+            compensation du pont) est traitée comme une mesure absente, jamais
+            comme une batterie critique : c'est le cas d'une broche en l'air
+            (pont non câblé, ~2 V lus sur la carte de développement).
 
     config NID_BATT_DIVIDER_X1000
         int "Rapport du pont diviseur × 1000 (Vbat = Vadc × rapport / 1000)"
