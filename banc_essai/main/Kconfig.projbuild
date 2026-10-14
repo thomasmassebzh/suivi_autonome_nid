@@ -1,22 +1,95 @@
 menu "Banc d'essai"
 
-    comment "Enregistrement (bouton BOOT ou commande « video » de la console)"
+    comment "Bouton BOOT, vidéo manuelle (appui long ou commande « video »)"
 
     config BANC_BOUTON_GPIO
-        int "GPIO du bouton d'enregistrement (actif bas)"
+        int "GPIO du bouton (actif bas)"
         range 0 54
         default 35
         help
             Bouton BOOT de l'ESP32-P4X-Function-EV-Board (GPIO35, vers la masse,
-            résistance de rappel sur la carte). Un appui démarre un enregistrement ;
-            un appui pendant l'enregistrement l'arrête (fichier fermé proprement).
+            résistance de rappel sur la carte). Appui court : armer / désarmer la
+            surveillance PIR ; appui long (1 s) : vidéo manuelle ; appui pendant
+            un enregistrement : arrêt anticipé (fichier fermé proprement).
             Maintenir BOOT pendant un appui sur RESET passe toujours la carte en
             mode téléchargement.
 
     config BANC_DUREE_S
-        int "Durée d'un enregistrement (s)"
+        int "Durée d'une vidéo manuelle (s)"
         range 1 300
         default 10
+
+    comment "Surveillance PIR (logique et réglages du firmware ; -1 = valeur par défaut de nid_config)"
+
+    config BANC_ARME_DEMARRAGE
+        bool "Surveillance armée au démarrage"
+        default y
+        help
+            Armée : un front du PIR lance une séquence après la chauffe du PIR.
+            Appui court sur BOOT, bouton ARMER de l'écran ou « armer on|off ».
+
+    config BANC_DET_DUREE_S
+        int "Durée d'une séquence sur détection (s ; -1 = 30 s du firmware)"
+        range -1 300
+        default -1
+
+    config BANC_DET_DELAI_S
+        int "Délai entre déclenchements (s ; -1 = 60 s du firmware ; 0 = enchaînement)"
+        range -1 3600
+        default -1
+        help
+            Compté depuis la fin de la séquence, comme le firmware. À 0, les
+            séquences s'enchaînent tant que le PIR reste actif.
+
+    config BANC_DET_CHAUFFE_S
+        int "Chauffe du PIR après la mise sous tension (s ; -1 = 60 s du firmware)"
+        range -1 120
+        default -1
+
+    config BANC_DET_SENSIBILITE
+        int "Sensibilité 1 à 5 (0 = 3 du firmware)"
+        range 0 5
+        default 0
+        help
+            Durée minimale d'activité du PIR pour valider un déclenchement :
+            5 → 0 ms, 4 → 50 ms, 3 → 150 ms, 2 → 300 ms, 1 → 500 ms. Plus court :
+            fausse détection, vidéo supprimée.
+
+    config BANC_PIR_ENCHAINEES_MAX
+        int "Séquences enchaînées au plus (délai à 0 et PIR toujours actif)"
+        range 1 100
+        default 10
+
+    config BANC_SUIVI_MIN
+        int "Intervalle des photos de suivi (min ; -1 = 15 min du firmware ; 0 = aucune)"
+        range -1 1440
+        default -1
+        help
+            Photos prises tant que la surveillance est armée. Pour l'essai :
+            commande « suivi 1 ».
+
+    choice BANC_NUIT_DEFAUT
+        prompt "Mode jour/nuit au démarrage"
+        default BANC_NUIT_DEFAUT_JOUR
+        help
+            Jour forcé par défaut (image couleur, LED IR éteintes). « nuit auto »
+            applique la décision du firmware (lever / coucher du soleil à la
+            latitude / longitude de nid_config).
+
+        config BANC_NUIT_DEFAUT_JOUR
+            bool "Jour forcé"
+        config BANC_NUIT_DEFAUT_AUTO
+            bool "Automatique (comme le firmware)"
+        config BANC_NUIT_DEFAUT_NUIT
+            bool "Nuit forcée"
+    endchoice
+
+    config BANC_SD_TEST_MO
+        int "Taille du test d'écriture de la carte SD (Mo)"
+        range 1 1024
+        default 32
+
+    comment "Vidéo (mêmes valeurs que config.ini)"
 
     choice BANC_RESOLUTION
         prompt "Résolution vidéo"
@@ -118,5 +191,32 @@ menu "Banc d'essai"
         range 1 10
         default 3
         depends on BANC_VUE_ENREG
+
+    config BANC_TACTILE
+        bool "Dalle tactile GT911 (boutons à l'écran)"
+        default y
+        depends on !BANC_ECRAN_AUCUN
+        help
+            Dalle tactile de l'écran 7 pouces du kit, sur le bus I2C partagé
+            (adresse 0x5D ou 0x14, détectée au démarrage). Absente : le banc
+            reste utilisable par le bouton BOOT et la console.
+
+    config BANC_TACTILE_MIROIR_X
+        bool "Tactile : miroir horizontal"
+        default y
+        depends on BANC_TACTILE
+        help
+            Réglage du BSP de la carte pour l'écran EK79007. Si un appui à gauche
+            agit à droite, inverser ce réglage.
+
+    config BANC_TACTILE_MIROIR_Y
+        bool "Tactile : miroir vertical"
+        default y
+        depends on BANC_TACTILE
+
+    config BANC_TACTILE_ECHANGE_XY
+        bool "Tactile : échanger X et Y"
+        default n
+        depends on BANC_TACTILE
 
 endmenu

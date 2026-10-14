@@ -4,14 +4,17 @@
  * REPL esp_console sur la console configurée (CONFIG_ESP_CONSOLE_* : port USB
  * Serial/JTAG de la P4X par défaut, ou UART), comme l'exemple d'ESP-IDF
  * examples/system/console/basic (domaine public / CC0). Les commandes qui
- * utilisent la caméra (video, photo) sont confiées à la tâche d'action du banc,
- * partagée avec le bouton BOOT : jamais deux enregistrements en même temps.
+ * utilisent la caméra, le micro ou écrivent sur la carte sont confiées à la
+ * tâche d'action du banc, partagée avec le bouton BOOT, l'écran tactile et le
+ * PIR : jamais deux enregistrements en même temps.
  */
 #include "banc.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -20,8 +23,11 @@
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "nid_board.h"
+#include "nid_detect.h"
+#include "nid_power.h"
 #include "nid_storage.h"
 
 static const char *TAG = "banc_console";
@@ -30,28 +36,37 @@ static const char *TAG = "banc_console";
 #define I2C_ADRESSE_MAX     0x77
 #define I2C_DELAI_MS        50
 
+static const char *const OCCUPE = "Occupé (enregistrement, photo ou test en cours) : réessayer à la fin\n";
+
+/** Entier décimal dans [min, max] ; false si invalide. */
+static bool lire_entier(const char *s, long min, long max, long *out)
+{
+    char *fin = NULL;
+    const long v = strtol(s, &fin, 10);
+    if (fin == s || *fin != '\0' || v < min || v > max) {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
 /* ------------------------------------------------------------------------- */
-/* video, photo, info, nuit                                                   */
+/* video, photo, info                                                         */
 /* ------------------------------------------------------------------------- */
 
 static int cmd_video(int argc, char **argv)
 {
     long duree = CONFIG_BANC_DUREE_S;
-    if (argc > 2) {
-        printf("Usage : video [durée_s]\n");
+    if (argc == 2 && strcmp(argv[1], "stop") == 0) {
+        banc_arreter("console");
+        return 0;
+    }
+    if (argc > 2 || (argc == 2 && !lire_entier(argv[1], 1, BANC_DUREE_MAX_S, &duree))) {
+        printf("Usage : video [durée_s]   (1 à %d s ; « video stop » : arrêt anticipé)\n", BANC_DUREE_MAX_S);
         return 1;
     }
-    if (argc == 2) {
-        char *fin = NULL;
-        duree = strtol(argv[1], &fin, 10);
-        if (fin == argv[1] || *fin != '\0' || duree < 1 || duree > 300) {
-            printf("Durée invalide : 1 à 300 s\n");
-            return 1;
-        }
-    }
-    esp_err_t err = banc_demander_video((uint32_t)duree, "console");
-    if (err != ESP_OK) {
-        printf("Occupé (enregistrement ou photo en cours) : réessayer à la fin\n");
+    if (banc_demander(BANC_ACTION_VIDEO, (uint32_t)duree, 0, "console") != ESP_OK) {
+        printf("%s", OCCUPE);
         return 1;
     }
     printf("Enregistrement de %ld s demandé : bilan à l'écran et sur la ligne « BILAN » du journal\n", duree);
@@ -62,8 +77,8 @@ static int cmd_photo(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    if (banc_demander_photo("console") != ESP_OK) {
-        printf("Occupé (enregistrement ou photo en cours) : réessayer à la fin\n");
+    if (banc_demander(BANC_ACTION_PHOTO, 0, 0, "console") != ESP_OK) {
+        printf("%s", OCCUPE);
         return 1;
     }
     printf("Photo demandée : bilan à l'écran et sur la ligne « BILAN » du journal\n");
@@ -78,27 +93,367 @@ static int cmd_info(int argc, char **argv)
     return 0;
 }
 
-static int cmd_nuit(int argc, char **argv)
+/* ------------------------------------------------------------------------- */
+/* Détection PIR                                                              */
+/* ------------------------------------------------------------------------- */
+
+static void afficher_detection(void)
 {
-    bool nuit;
+    banc_etat_t e;
+    banc_etat_lire(&e);
+    char decl[40];
+    banc_couleur_t fond;
+    banc_texte_declenchement(&e, esp_timer_get_time(), decl, sizeof(decl), &fond);
+    printf("PIR (GPIO%d) : %s ; déclenchement %s\n", (int)nid_board_pins()->pir,
+           nid_detect_pir_active() ? "ACTIF" : "repos", decl);
+    printf("Fronts %" PRIu32 ", détections %" PRIu32 ", séquences %" PRIu32 ", fausses %" PRIu32 ", ignorés %" PRIu32
+           "%s%s%s\n", e.fronts, e.detections, e.sequences, e.fausses, e.ignorees, e.ignorees ? " (dernier : " : "",
+           e.ignorees ? e.ignoree_motif : "", e.ignorees ? ")" : "");
+    if (e.latence_ms >= 0) {
+        printf("Latence front PIR → 1re image de la dernière séquence : %" PRId32 " ms\n", e.latence_ms);
+    }
+}
+
+static int cmd_armer(int argc, char **argv)
+{
     if (argc == 2 && strcmp(argv[1], "on") == 0) {
-        nuit = true;
+        banc_armer(true, "console");
     } else if (argc == 2 && strcmp(argv[1], "off") == 0) {
-        nuit = false;
-    } else {
-        printf("Usage : nuit on|off\n");
+        banc_armer(false, "console");
+    } else if (argc != 1) {
+        printf("Usage : armer [on|off]   (sans argument : état)\n");
         return 1;
     }
-    esp_err_t err = banc_regler_nuit(nuit);
-    banc_rafraichir_entete();
-    if (err == ESP_OK) {
-        printf("Mode %s : image %s (les LED IR ne sont pas pilotées par le banc)\n", nuit ? "nuit" : "jour",
-               nuit ? "en niveaux de gris" : "en couleur");
+    afficher_detection();
+    return 0;
+}
+
+static int cmd_compteurs(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "raz") == 0) {
+        banc_compteurs_raz();
+        printf("Compteurs remis à zéro\n");
+    } else if (argc != 1) {
+        printf("Usage : compteurs [raz]\n");
+        return 1;
+    }
+    afficher_detection();
+    return 0;
+}
+
+static int cmd_regle(int argc, char **argv)
+{
+    if (argc == 3) {
+        esp_err_t err = banc_regler(argv[1], argv[2]);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("Clé inconnue ou non modifiable sur le banc : %s\n", argv[1]);
+        } else if (err != ESP_OK) {
+            printf("Valeur refusée pour %s : %s (voir les plages de config.ini)\n", argv[1], argv[2]);
+        }
+        if (err != ESP_OK) {
+            return 1;
+        }
+    } else if (argc != 1) {
+        printf("Usage : regle [clé valeur]   (clés de config.ini, ex. regle delai_entre_declenchements_s 20)\n");
+        return 1;
+    }
+    nid_config_t c;
+    banc_reglages(&c);
+    printf("duree_sequence_s = %u\ndelai_entre_declenchements_s = %u   (compté depuis la fin de la séquence ; 0 = "
+           "enchaînement tant que le PIR est actif)\nchauffe_pir_s = %u\nsensibilite = %u   (actif %" PRIu32
+           " ms au moins)\nintervalle_suivi_min = %u   (0 = pas de photo de suivi)\nmode = %s\nlatitude = %.4f\n"
+           "longitude = %.4f\navance_crepuscule_min = %d\nretard_aube_min = %d\npuissance_ir = %u\nnuit_monochrome = %s\n",
+           c.seq_duration_s, c.trigger_delay_s, c.pir_warmup_s, c.pir_sensitivity,
+           nid_detect_min_active_ms(c.pir_sensitivity), c.photo_interval_min, nid_config_night_mode_str(c.night_mode),
+           (double)c.latitude, (double)c.longitude, c.dusk_advance_min, c.dawn_delay_min, c.ir_power_pct,
+           c.night_monochrome ? "oui" : "non");
+    return 0;
+}
+
+static int cmd_suivi(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("Usage : suivi <minutes>   (0 = arrêt ; photos prises si la surveillance est armée)\n");
+        return 1;
+    }
+    if (banc_regler("intervalle_suivi_min", argv[1]) != ESP_OK) {
+        printf("Intervalle invalide : 0 à 1440 min\n");
+        return 1;
+    }
+    banc_etat_t e;
+    banc_etat_lire(&e);
+    printf("Photo de suivi toutes les %s min%s\n", argv[1], e.arme ? "" : " (surveillance désarmée : « armer on »)");
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Nuit                                                                       */
+/* ------------------------------------------------------------------------- */
+
+static void afficher_nuit(void)
+{
+    banc_etat_t e;
+    banc_etat_lire(&e);
+    static const char *const modes[] = { "jour forcé", "nuit forcée", "automatique (firmware)" };
+    char lever[12], coucher[12];
+    bool nuit = false;
+    banc_soleil(lever, coucher, sizeof(lever), &nuit);
+    nid_config_t c;
+    banc_reglages(&c);
+    printf("Mode %s : %s ; LED IR %u %% ; filtre IR-cut %s ; image %s\n", modes[e.mode_nuit],
+           e.nuit_active ? "NUIT" : "JOUR", e.led_ir_pct,
+           e.filtre_jour < 0 ? "non câblé" : (e.filtre_jour ? "jour" : "nuit"), e.mono ? "monochrome" : "couleur");
+    printf("Soleil à %.2f N, %.2f E : lever %s, coucher %s (heure locale du banc) ; décision du firmware : %s\n",
+           (double)c.latitude, (double)c.longitude, lever, coucher, nuit ? "NUIT" : "JOUR");
+}
+
+static int cmd_nuit(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "on") == 0) {
+        banc_nuit_mode(BANC_NUIT_NUIT);
+    } else if (argc == 2 && strcmp(argv[1], "off") == 0) {
+        banc_nuit_mode(BANC_NUIT_JOUR);
+    } else if (argc == 2 && strcmp(argv[1], "auto") == 0) {
+        banc_nuit_mode(BANC_NUIT_AUTO);
+    } else if (argc != 1) {
+        printf("Usage : nuit [on|off|auto]   (filtre, LED IR à puissance_ir, monochrome, comme le firmware)\n");
+        return 1;
+    }
+    afficher_nuit();
+    return 0;
+}
+
+static int cmd_ir(int argc, char **argv)
+{
+    long pct = 0;
+    if (argc != 2 || !lire_entier(argv[1], 0, 100, &pct)) {
+        printf("Usage : ir <0-100>   (puissance des LED IR en %%, PWM)\n");
+        return 1;
+    }
+    esp_err_t err = banc_ir_puissance((uint8_t)pct);
+    if (err != ESP_OK) {
+        printf("LED IR non configurées (menu « Suivi nid — Carte et brochage ») : %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("LED IR à %ld %% (GPIO%d)\n", pct, (int)nid_board_pins()->ir_led);
+    return 0;
+}
+
+static int cmd_ircut(int argc, char **argv)
+{
+    bool jour;
+    if (argc == 2 && strcmp(argv[1], "jour") == 0) {
+        jour = true;
+    } else if (argc == 2 && strcmp(argv[1], "nuit") == 0) {
+        jour = false;
+    } else {
+        printf("Usage : ircut jour|nuit   (jour : filtre en place)\n");
+        return 1;
+    }
+    esp_err_t err = banc_ircut(jour);
+    if (err != ESP_OK) {
+        printf("Filtre IR-cut non commandé : %s (menu « Commande du filtre IR-cut »)\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Filtre IR-cut : %s\n", jour ? "jour (en place)" : "nuit (retiré)");
+    return 0;
+}
+
+static int cmd_mono(int argc, char **argv)
+{
+    bool mono;
+    if (argc == 2 && strcmp(argv[1], "on") == 0) {
+        mono = true;
+    } else if (argc == 2 && strcmp(argv[1], "off") == 0) {
+        mono = false;
+    } else {
+        printf("Usage : mono on|off   (image en niveaux de gris par l'ISP)\n");
+        return 1;
+    }
+    esp_err_t err = banc_mono(mono);
+    if (err != ESP_OK) {
+        printf("Non appliqué : %s%s\n", esp_err_to_name(err), err == ESP_ERR_INVALID_STATE ? " (caméra non prête)" : "");
+        return 1;
+    }
+    printf("Image %s\n", mono ? "monochrome" : "couleur");
+    return 0;
+}
+
+static int cmd_soleil(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    afficher_nuit();
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Son, batterie, température                                                 */
+/* ------------------------------------------------------------------------- */
+
+static int cmd_son(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "video") == 0) {
+        long duree = CONFIG_BANC_DUREE_S;
+        if (argc == 3 && !lire_entier(argv[2], 1, BANC_DUREE_MAX_S, &duree)) {
+            printf("Durée invalide : 1 à %d s\n", BANC_DUREE_MAX_S);
+            return 1;
+        }
+        if (banc_demander(BANC_ACTION_SON_VIDEO, (uint32_t)duree, 0, "console") != ESP_OK) {
+            printf("%s", OCCUPE);
+            return 1;
+        }
+        printf("Vidéo de test du son (%ld s) : parler près du micro ; vérifier trames_son dans le BILAN\n", duree);
         return 0;
     }
-    printf("Mode %s mémorisé, non appliqué : %s%s\n", nuit ? "nuit" : "jour", esp_err_to_name(err),
-           err == ESP_ERR_INVALID_STATE ? " (caméra non prête)" : "");
-    return 1;
+    if (argc != 1) {
+        printf("Usage : son [video [durée_s]]\n");
+        return 1;
+    }
+    if (!banc_reglages_capture()->audio) {
+        printf("Piste son désactivée (menu « Banc d'essai »)\n");
+        return 1;
+    }
+    nid_capture_audio_level_t l;
+    bool valide;
+    if (banc_enregistrement_en_cours()) {
+        valide = nid_capture_audio_last_level(&l);
+    } else {
+        esp_err_t err = nid_capture_audio_level(1000, &l);
+        valide = (err == ESP_OK);
+        if (!valide) {
+            printf("Mesure impossible : %s (ES8311 : « i2cscan » doit montrer 0x18)\n", esp_err_to_name(err));
+            return 1;
+        }
+    }
+    if (!valide) {
+        printf("Pas de niveau disponible\n");
+        return 1;
+    }
+    const int rms = banc_dbfs10(l.rms);
+    const int crete = banc_dbfs10(l.peak);
+    printf("Micro : efficace %d.%d dBFS, crête %d.%d dBFS (%u / %u sur 32767)\n", rms / 10, abs(rms % 10),
+           crete / 10, abs(crete % 10), l.rms, l.peak);
+    return 0;
+}
+
+static int cmd_batterie(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    uint32_t mv = 0, brut = 0;
+    esp_err_t err = banc_batterie(&mv, &brut);
+    if (err == ESP_OK) {
+        printf("Batterie : %" PRIu32 " mV (GPIO%d, rapport du pont %d/1000)\n", mv, (int)nid_board_pins()->batt_adc,
+               CONFIG_NID_BATT_DIVIDER_X1000);
+    } else if (err == ESP_ERR_INVALID_RESPONSE) {
+        printf("Batterie : non câblée — %" PRIu32 " mV lus, hors plage %d à %d mV : mesure ignorée, jamais d'arrêt\n",
+               brut, NID_BATT_PLAUSIBLE_MIN_MV, NID_BATT_PLAUSIBLE_MAX_MV);
+    } else {
+        printf("Batterie : pas de mesure (%s)\n", esp_err_to_name(err));
+    }
+    return 0;
+}
+
+static int cmd_temp(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    float c = 0.0f;
+    esp_err_t err = banc_temperature(&c);
+    if (err != ESP_OK) {
+        printf("Capteur de température : %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Température de la puce : %.1f °C\n", (double)c);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Carte SD, endurance                                                        */
+/* ------------------------------------------------------------------------- */
+
+static int cmd_sd(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "test") == 0) {
+        long mo = CONFIG_BANC_SD_TEST_MO;
+        if (argc == 3 && !lire_entier(argv[2], 1, 1024, &mo)) {
+            printf("Taille invalide : 1 à 1024 Mo\n");
+            return 1;
+        }
+        if (banc_demander(BANC_ACTION_SD_TEST, (uint32_t)mo, 0, "console") != ESP_OK) {
+            printf("%s", OCCUPE);
+            return 1;
+        }
+        printf("Test d'écriture de %ld Mo lancé (bilan : ligne « BILAN sd_test »)\n", mo);
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "scan") == 0) {
+        if (banc_demander(BANC_ACTION_SD_SCAN, 0, 0, "console") != ESP_OK) {
+            printf("%s", OCCUPE);
+            return 1;
+        }
+        printf("Recomptage de l'espace libre lancé (lecture de toute la FAT)\n");
+        return 0;
+    }
+    if (argc != 1) {
+        printf("Usage : sd [test [Mo] | scan]\n");
+        return 1;
+    }
+    nid_storage_volume_t v;
+    banc_volume_sd(&v);
+    if (!nid_storage_is_mounted()) {
+        printf("Carte SD non montée\n");
+        return 1;
+    }
+    printf("Volume FAT%u : %" PRIu64 " Mo libres sur %" PRIu64 " Mo ; carte %" PRIu64 " Mo ; grappes de %" PRIu32
+           " ko ; début au secteur %" PRIu32 "\n", v.fat_type, v.free_bytes / 1000000ULL, v.volume_bytes / 1000000ULL,
+           v.card_bytes / 1000000ULL, v.cluster_bytes / 1024u, v.first_sector);
+    if (v.card_bytes > 0 && v.volume_bytes < v.card_bytes / 10 * 9) {
+        printf("ATTENTION : le volume ne couvre pas la carte (plusieurs partitions ?) : reformater en une seule FAT32\n");
+    }
+    return 0;
+}
+
+static int cmd_boucle(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "stop") == 0) {
+        banc_arreter("console");
+        return 0;
+    }
+    long n = 0, duree = CONFIG_BANC_DUREE_S;
+    if (argc < 2 || argc > 3 || !lire_entier(argv[1], 1, 1000, &n) ||
+        (argc == 3 && !lire_entier(argv[2], 1, BANC_DUREE_MAX_S, &duree))) {
+        printf("Usage : boucle N [durée_s] | boucle stop   (N vidéos d'affilée, bilan mémoire et images perdues)\n");
+        return 1;
+    }
+    if (banc_demander(BANC_ACTION_BOUCLE, (uint32_t)n, (uint32_t)duree, "console") != ESP_OK) {
+        printf("%s", OCCUPE);
+        return 1;
+    }
+    printf("Endurance : %ld vidéo(s) de %ld s ; arrêt par BOOT ou « boucle stop » ; bilan : « BILAN boucle »\n", n,
+           duree);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Écran                                                                      */
+/* ------------------------------------------------------------------------- */
+
+static int cmd_ecran(int argc, char **argv)
+{
+    if (argc == 2) {
+        for (int i = 0; i < BANC_NB_ONGLETS; i++) {
+            if (strcasecmp(argv[1], banc_ui_nom_onglet((banc_onglet_t)i)) == 0) {
+                banc_ui_choisir((banc_onglet_t)i);
+                printf("Onglet %s\n", argv[1]);
+                return 0;
+            }
+        }
+    }
+    printf("Usage : ecran detection|photo|nuit|son|systeme   (onglet affiché : %s)\n",
+           banc_ui_nom_onglet(banc_ui_onglet()));
+    return argc == 1 ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -156,11 +511,8 @@ static int cmd_i2cscan(int argc, char **argv)
 
 static void afficher_heure(void)
 {
-    const time_t now = time(NULL);
-    struct tm tm;
     char txt[32];
-    localtime_r(&now, &tm);
-    strftime(txt, sizeof(txt), "%Y-%m-%d %H:%M:%S", &tm);
+    banc_heure_locale(txt, sizeof(txt), "%Y-%m-%d %H:%M:%S");
     printf("Heure locale : %s (fuseau %s)\n", txt, CONFIG_BANC_FUSEAU);
 }
 
@@ -200,6 +552,7 @@ static int cmd_heure(int argc, char **argv)
     afficher_heure();
     nid_storage_journal("heure_reglee", "%s %s (console du banc)", argv[1], argv[2]);
     banc_rafraichir_entete();
+    banc_nuit_actualiser(false);
     return 0;
 }
 
@@ -210,39 +563,40 @@ static int cmd_heure(int argc, char **argv)
 esp_err_t banc_console_demarrer(void)
 {
     static const esp_console_cmd_t cmds[] = {
-        {
-            .command = "video",
-            .help = "Enregistre une vidéo MP4 (durée par défaut : menu « Banc d'essai »), comme le bouton BOOT",
-            .hint = "[durée_s]",
-            .func = cmd_video,
-        },
-        {
-            .command = "photo",
-            .help = "Prend une photo JPEG sur la carte SD",
-            .func = cmd_photo,
-        },
-        {
-            .command = "info",
-            .help = "Capteur, réglages, carte SD, mémoire libre, version, dernier bilan",
-            .func = cmd_info,
-        },
-        {
-            .command = "nuit",
-            .help = "Mode nuit (image monochrome par l'ISP) ou jour",
-            .hint = "on|off",
-            .func = cmd_nuit,
-        },
-        {
-            .command = "i2cscan",
-            .help = "Liste les périphériques du bus I2C partagé (caméra, codec, tactile, horloge)",
-            .func = cmd_i2cscan,
-        },
-        {
-            .command = "heure",
-            .help = "Affiche ou règle l'heure locale",
-            .hint = "[AAAA-MM-JJ HH:MM:SS]",
-            .func = cmd_heure,
-        },
+        { .command = "video", .help = "Vidéo MP4 manuelle (durée par défaut : menu « Banc d'essai ») ; « video stop »",
+          .hint = "[durée_s|stop]", .func = cmd_video },
+        { .command = "photo", .help = "Photo JPEG sur la carte SD", .func = cmd_photo },
+        { .command = "armer", .help = "Arme / désarme la surveillance PIR (sans argument : état du PIR et compteurs)",
+          .hint = "[on|off]", .func = cmd_armer },
+        { .command = "compteurs", .help = "Compteurs de détection, latence ; « raz » pour les remettre à zéro",
+          .hint = "[raz]", .func = cmd_compteurs },
+        { .command = "regle", .help = "Réglages de détection, suivi et nuit à chaud (clés de config.ini)",
+          .hint = "[clé valeur]", .func = cmd_regle },
+        { .command = "suivi", .help = "Intervalle des photos de suivi en minutes (0 = arrêt)", .hint = "<min>",
+          .func = cmd_suivi },
+        { .command = "nuit", .help = "Mode jour / nuit / automatique (filtre, LED IR, monochrome)",
+          .hint = "[on|off|auto]", .func = cmd_nuit },
+        { .command = "ir", .help = "Puissance des LED IR en % (test direct)", .hint = "<0-100>", .func = cmd_ir },
+        { .command = "ircut", .help = "Filtre IR-cut (test direct)", .hint = "jour|nuit", .func = cmd_ircut },
+        { .command = "mono", .help = "Image monochrome par l'ISP (test direct)", .hint = "on|off", .func = cmd_mono },
+        { .command = "soleil", .help = "Lever et coucher du soleil du jour, décision jour/nuit du firmware",
+          .func = cmd_soleil },
+        { .command = "son", .help = "Niveau du micro (1 s) ; « son video [s] » : vidéo de test du son",
+          .hint = "[video [durée_s]]", .func = cmd_son },
+        { .command = "batterie", .help = "Tension de la batterie (ou « non câblée »)", .func = cmd_batterie },
+        { .command = "temp", .help = "Température de la puce", .func = cmd_temp },
+        { .command = "sd", .help = "Volume de la carte ; « sd test [Mo] » : débit ; « sd scan » : recompte le libre",
+          .hint = "[test [Mo]|scan]", .func = cmd_sd },
+        { .command = "boucle", .help = "Endurance : N vidéos d'affilée, bilan mémoire et images perdues",
+          .hint = "N [durée_s] | stop", .func = cmd_boucle },
+        { .command = "ecran", .help = "Onglet de l'écran", .hint = "detection|photo|nuit|son|systeme",
+          .func = cmd_ecran },
+        { .command = "info", .help = "Capteur, réglages, compteurs, carte SD, mémoire, version, dernier bilan",
+          .func = cmd_info },
+        { .command = "i2cscan", .help = "Liste les périphériques du bus I2C partagé (caméra, codec, tactile, horloge)",
+          .func = cmd_i2cscan },
+        { .command = "heure", .help = "Affiche ou règle l'heure locale", .hint = "[AAAA-MM-JJ HH:MM:SS]",
+          .func = cmd_heure },
     };
 
     ESP_RETURN_ON_ERROR(esp_console_register_help_command(), TAG, "commande help");
