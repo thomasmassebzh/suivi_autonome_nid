@@ -153,6 +153,25 @@ l'arrête.
    (comme le firmware de terrain) renomme le fichier interrompu en `..._INCOMPLET` et l'indique à
    l'écran ; aucun fichier ne doit porter un nom final sans être lisible.
 
+## Étape 7 bis — tests du banc
+
+Le banc teste ensuite chaque fonction, écran allumé (onglets DÉTECTION, PHOTO, NUIT, SON, SYSTÈME,
+tactiles ou commande `ecran`). Détails, valeurs attendues et interprétation :
+[banc_essai/README.md](../banc_essai/README.md#tests-dans-lordre-conseillé). Ordre conseillé :
+
+1. **Démarrage** : écran de sélection des fonctions (5 s, ne garder que le matériel branché),
+   `i2cscan` (caméra, ES8311 0x18, GT911 0x5D/0x14), `info`, `heure AAAA-MM-JJ HH:MM:SS`.
+2. **Carte SD** (onglet SYSTÈME) : `sd` (volume ≈ capacité de la carte), `sd test` (débit, latence max).
+3. **Vidéo avec son** : appui long sur BOOT (ou `son video`) ; `trames_son` > 0, `perdues` = 0, piste
+   `aac` dans `ffprobe`.
+4. **Détection PIR** (onglet DÉTECTION, priorité) : pastille PIR en temps réel, chauffe puis ARMÉ,
+   séquence de 30 s sur un passage, délai de 60 s, fausses détections, latence front → 1re image.
+5. **Photo** puis **photo de suivi** : `suivi 1`, une photo par minute tant que la surveillance est armée.
+6. **Nuit** : `nuit on/off/auto`, `ir 50`, `ircut jour|nuit`, `mono on|off`, `soleil`.
+7. **Son** : vumètre de l'onglet SON (parler, taper près du micro).
+8. **Batterie et température** : `batterie` (« non câblée » sans pont diviseur), `temp`.
+9. **Endurance** : `boucle 20`, puis comparer la mémoire avant/après et les images perdues.
+
 ## Étape 8 — `peripherals/i2s/i2s_codec/i2s_es8311`
 
 Valide : codec audio, micro (et haut-parleur). Les broches par défaut pour l'ESP32-P4 sont celles
