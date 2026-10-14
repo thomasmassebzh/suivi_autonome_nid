@@ -48,6 +48,8 @@ Guide officiel : *ESP32-P4X-Function-EV-Board User Guide* (esp-dev-kits). Points
    (par ex. `get-started/hello_world`) › choisir un dossier **hors du dépôt** (par ex. `~/essais_esp/`).
 2. Ouvrir ce dossier, puis comme pour le firmware : `ESP-IDF: Set Espressif Device Target` ›
    **esp32p4**, `ESP-IDF: SDK Configuration Editor` si un réglage est indiqué ci-dessous,
+   `ESP-IDF: Select Flash Method` › **UART** (pas JTAG : la méthode JTAG passe par OpenOCD et un pilote
+   WinUSB, et échoue avec `esp_usb_jtag: could not find or open device`), port COMx de la carte,
    `ESP-IDF: Build, Flash and Start a Monitor on Your Device` (voir les étapes 3 à 6 du
    [README](../README.md)).
 
@@ -68,9 +70,11 @@ puce rév. v3.1 : ne pas cocher `ESP32P4_SELECTS_REV_LESS_V3`.
 ## Étape 1 — `get-started/hello_world`
 
 Valide : environnement, câble, port, flash, moniteur. Résultat attendu dans le moniteur :
-`This is esp32p4 chip with 2 CPU core(s)`, **`silicon revision v3.1`** (ou 3.x),
-**`16MB external flash`**. Si le flash échoue : maintenir **BOOT**, appuyer sur **RESET**, relâcher
-BOOT, puis relancer le flash.
+`This is esp32p4 chip with 2 CPU core(s)`, **`silicon revision v3.1`** (ou 3.x), `2MB external flash`
+précédé de l'avertissement **`Detected size(16384k) larger than the size in the binary image header(2048k)`** :
+les 16 Mo sont bien détectés, l'exemple étant compilé pour 2 Mo par défaut. Si le flash échoue :
+vérifier la méthode **UART** (pas JTAG), puis maintenir **BOOT**, appuyer sur **RESET**, relâcher
+BOOT, et relancer le flash.
 
 ## Étape 2 — `peripherals/i2c/i2c_tools`
 
