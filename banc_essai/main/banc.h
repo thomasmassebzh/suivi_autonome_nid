@@ -86,6 +86,9 @@ esp_err_t banc_ecran_init(void);
 /** true si l'écran est en service. */
 bool banc_ecran_ok(void);
 
+/** Éteint l'écran (fonction désactivée à l'écran de sélection) : plus aucun dessin. */
+void banc_ecran_couper(void);
+
 /** Description de l'écran (« EK79007 1024x600 », « aucun »...). */
 const char *banc_ecran_nom(void);
 
@@ -130,6 +133,72 @@ void banc_ecran_barre(const banc_rect_t *r, int pour_mille, int repere_pour_mill
 
 /** Disque plein (voyant « REC »). */
 void banc_ecran_disque(uint16_t cx, uint16_t cy, uint16_t rayon, banc_couleur_t couleur);
+
+/* ========================================================================= */
+/* Fonctions à tester (banc_fonctions.c)                                      */
+/* ========================================================================= */
+
+typedef enum {
+    BANC_F_ECRAN = 0,
+    BANC_F_TACTILE,
+    BANC_F_CAMERA,
+    BANC_F_SON,
+    BANC_F_SD,
+    BANC_F_PIR,
+    BANC_F_NUIT,
+    BANC_F_BATTERIE,
+    BANC_F_TEMPERATURE,
+    BANC_F_SUIVI,
+    BANC_F_CONSOLE,
+    BANC_NB_F,
+} banc_fonction_t;
+
+typedef enum {
+    BANC_FE_NON_COMPILEE = 0,   /*!< retirée dans le menu « Banc d'essai › Fonctions activées » */
+    BANC_FE_DESACTIVEE,         /*!< désactivée à l'écran de sélection (ou fonction dont elle dépend) */
+    BANC_FE_ACTIVE,
+    BANC_FE_DEFAUT,             /*!< initialisation en échec : les autres fonctions continuent */
+} banc_fonction_etat_t;
+
+/** Charge la sélection mémorisée (NVS ; par défaut : toutes les fonctions compilées). */
+void banc_fonctions_charger(void);
+
+/**
+ * Écran de sélection du démarrage (écran tactile, bouton BOOT, console
+ * « fonctions ») ; démarrage automatique après CONFIG_BANC_SELECTION_S sans
+ * action. Mémorise la sélection en NVS.
+ */
+void banc_fonctions_selection(void);
+
+/** true si la fonction est choisie (compilée et sélectionnée, dépendances comprises) et pas en défaut. */
+bool banc_f_active(banc_fonction_t f);
+
+/** Marque la fonction « en défaut » (échec d'initialisation, err journalisée). */
+void banc_f_defaut(banc_fonction_t f, esp_err_t err);
+
+/** Efface l'état « en défaut » (nouvel essai réussi : carte insérée, caméra rebranchée). */
+void banc_f_retablir(banc_fonction_t f);
+
+banc_fonction_etat_t banc_f_etat(banc_fonction_t f);
+
+/** « désactivé », « en défaut », « non compilé », ou NULL si active. */
+const char *banc_f_texte(banc_fonction_t f);
+
+/** Nom court (console) et libellé de la fonction. */
+const char *banc_f_nom(banc_fonction_t f);
+const char *banc_f_libelle(banc_fonction_t f);
+
+/** Change la sélection (pendant l'écran de sélection : immédiat ; ensuite : au prochain démarrage). */
+esp_err_t banc_f_choisir(banc_fonction_t f, bool choisie);
+
+/** true si la fonction est sélectionnée (indépendamment d'un défaut). */
+bool banc_f_choisie(banc_fonction_t f);
+
+/** Termine l'écran de sélection tout de suite (console « fonctions go »). */
+void banc_fonctions_valider(void);
+
+/** true pendant l'écran de sélection. */
+bool banc_fonctions_en_selection(void);
 
 /* ========================================================================= */
 /* Dalle tactile (banc_tactile.c)                                             */

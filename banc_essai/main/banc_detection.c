@@ -244,6 +244,9 @@ void banc_suivi_planifier(void)
 
 bool banc_suivi_du(void)
 {
+    if (!banc_f_active(BANC_F_SUIVI)) {
+        return false;
+    }
     const int64_t p = s_suivi_prochaine_us;
     return p != 0 && esp_timer_get_time() >= p && !banc_enregistrement_en_cours();
 }
@@ -440,6 +443,10 @@ esp_err_t banc_detection_init(void)
              " ms), photo de suivi %u min", ARME_DEMARRAGE ? "armée" : "désarmée", cfg.seq_duration_s,
              cfg.trigger_delay_s, cfg.pir_warmup_s, cfg.pir_sensitivity,
              nid_detect_min_active_ms(cfg.pir_sensitivity), cfg.photo_interval_min);
+    if (!banc_f_active(BANC_F_PIR)) {
+        ESP_LOGI(TAG, "PIR et détection : %s", banc_f_texte(BANC_F_PIR));
+        return ESP_OK;      /* réglages seulement : ni entrées ni interruptions */
+    }
 
     esp_err_t err = nid_detect_init();
     if (err != ESP_OK) {

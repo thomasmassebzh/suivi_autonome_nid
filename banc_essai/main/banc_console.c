@@ -22,6 +22,7 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_console.h"
+#include "esp_system.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -457,6 +458,68 @@ static int cmd_ecran(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Fonctions à tester                                                         */
+/* ------------------------------------------------------------------------- */
+
+static int cmd_fonctions(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "go") == 0) {
+        if (!banc_fonctions_en_selection()) {
+            printf("Le banc a déjà démarré\n");
+            return 1;
+        }
+        banc_fonctions_valider();
+        return 0;
+    }
+    if (argc == 3 && (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "off") == 0)) {
+        const bool on = (strcmp(argv[1], "on") == 0);
+        int trouve = -1;
+        for (int f = 0; f < BANC_NB_F; f++) {
+            if (strcasecmp(argv[2], banc_f_nom((banc_fonction_t)f)) == 0) {
+                trouve = f;
+            }
+        }
+        if (trouve < 0) {
+            printf("Fonction inconnue : %s\n", argv[2]);
+            return 1;
+        }
+        if (banc_f_choisir((banc_fonction_t)trouve, on) != ESP_OK) {
+            printf("Fonction non compilée (menu « Banc d'essai › Fonctions activées »)\n");
+            return 1;
+        }
+        printf("%s : %s%s\n", banc_f_libelle((banc_fonction_t)trouve), on ? "activée" : "désactivée",
+               banc_fonctions_en_selection() ? "" : " au prochain démarrage (commande « redemarrer » ou RESET)");
+    } else if (argc != 1) {
+        printf("Usage : fonctions [on|off <nom> | go]\n");
+        return 1;
+    }
+    printf("%-12s %-30s %s\n", "nom", "fonction", "état");
+    for (int f = 0; f < BANC_NB_F; f++) {
+        const char *t = banc_f_texte((banc_fonction_t)f);
+        const bool choisie = banc_f_choisie((banc_fonction_t)f);
+        printf("%-12s %-30s %s%s\n", banc_f_nom((banc_fonction_t)f), banc_f_libelle((banc_fonction_t)f),
+               t ? t : "active", (!banc_fonctions_en_selection() && t != NULL && choisie &&
+                                  banc_f_etat((banc_fonction_t)f) == BANC_FE_DESACTIVEE) ? " (dépendance)" : "");
+    }
+    return 0;
+}
+
+static int cmd_redemarrer(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    if (banc_enregistrement_en_cours()) {
+        printf("Enregistrement en cours : réessayer à la fin\n");
+        return 1;
+    }
+    printf("Redémarrage...\n");
+    fflush(stdout);
+    nid_storage_unmount();
+    esp_restart();
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* i2cscan                                                                    */
 /* ------------------------------------------------------------------------- */
 
@@ -591,6 +654,9 @@ esp_err_t banc_console_demarrer(void)
           .hint = "N [durée_s] | stop", .func = cmd_boucle },
         { .command = "ecran", .help = "Onglet de l'écran", .hint = "detection|photo|nuit|son|systeme",
           .func = cmd_ecran },
+        { .command = "fonctions", .help = "Fonctions à tester : liste ; on|off <nom> (mémorisé) ; go (fin de la sélection)",
+          .hint = "[on|off <nom> | go]", .func = cmd_fonctions },
+        { .command = "redemarrer", .help = "Redémarre la carte (carte SD démontée proprement)", .func = cmd_redemarrer },
         { .command = "info", .help = "Capteur, réglages, compteurs, carte SD, mémoire, version, dernier bilan",
           .func = cmd_info },
         { .command = "i2cscan", .help = "Liste les périphériques du bus I2C partagé (caméra, codec, tactile, horloge)",

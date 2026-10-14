@@ -239,6 +239,9 @@ void banc_afficher_erreur(const char *etape, esp_err_t err, const char *piste)
 
 static const char *piste_sd(esp_err_t err)
 {
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        return "Fonction « carte SD » désactivée\n(écran de démarrage, « fonctions »)";
+    }
     if (err == ESP_FAIL) {
         return "Carte SD illisible : la formater en FAT32 sur un ordinateur\n"
                "(le banc ne formate jamais une carte)";
@@ -271,6 +274,9 @@ esp_err_t banc_preparer_sd(void)
 {
     if (nid_storage_is_mounted()) {
         return ESP_OK;
+    }
+    if (!banc_f_choisie(BANC_F_SD)) {
+        return ESP_ERR_NOT_SUPPORTED;   /* fonction désactivée : la carte n'est jamais montée */
     }
     esp_err_t err = nid_storage_mount();
     if (err == ESP_OK) {
@@ -324,16 +330,26 @@ static esp_err_t preparer_camera(void)
 
 bool banc_preparer(void)
 {
+    /* Fonction désactivée : refus ; en défaut (échec au démarrage) : nouvel essai. */
+    if (!banc_f_choisie(BANC_F_SD) || !banc_f_choisie(BANC_F_CAMERA)) {
+        const bool sd = !banc_f_choisie(BANC_F_SD);
+        banc_afficher_erreur(sd ? "carte SD" : "caméra", ESP_ERR_NOT_SUPPORTED,
+                             sd ? "Fonction « carte SD » désactivée\n(écran de démarrage, « fonctions »)"
+                                : "Fonction « caméra » désactivée\n(écran de démarrage, « fonctions »)");
+        return false;
+    }
     esp_err_t err = banc_preparer_sd();
     if (err != ESP_OK) {
         banc_afficher_erreur("carte SD", err, piste_sd(err));
         return false;
     }
+    banc_f_retablir(BANC_F_SD);
     err = preparer_camera();
     if (err != ESP_OK) {
         banc_afficher_erreur("caméra", err, piste_camera(err));
         return false;
     }
+    banc_f_retablir(BANC_F_CAMERA);
     return true;
 }
 
@@ -437,7 +453,7 @@ static void tache_action(void *arg)
             continue;
         }
         /* Onglet « Son » : vumètre (~200 ms par mesure, le viseur ralentit). */
-        if (banc_ui_onglet() == BANC_ONGLET_SON && nid_capture_is_ready() && s_reglages.audio) {
+        if (banc_ui_onglet() == BANC_ONGLET_SON && nid_capture_is_ready() && banc_f_active(BANC_F_SON)) {
             banc_son_mesurer();
         }
         if (viseur) {
@@ -628,6 +644,27 @@ void banc_afficher_info(void)
 /* Démarrage                                                                  */
 /* ------------------------------------------------------------------------- */
 
+/** Bilan des fonctions (bandeau et journal série). */
+static void afficher_fonctions(void)
+{
+    char liste[160] = "";
+    int actives = 0;
+    for (int f = 0; f < BANC_NB_F; f++) {
+        const banc_fonction_etat_t e = banc_f_etat((banc_fonction_t)f);
+        if (e == BANC_FE_ACTIVE) {
+            actives++;
+        } else if (e != BANC_FE_NON_COMPILEE) {
+            char t[40];
+            snprintf(t, sizeof(t), "%s%s %s", liste[0] ? ", " : "", banc_f_nom((banc_fonction_t)f),
+                     banc_f_texte((banc_fonction_t)f));
+            strlcat(liste, t, sizeof(liste));
+        }
+    }
+    ESP_LOGI(TAG, "FONCTIONS actives=%d %s", actives, liste);
+    banc_ecran_ligne(BANC_LIGNE_DETAIL3, liste[0] ? BANC_JAUNE : BANC_BLANC, "Fonctions : %d active(s)%s%s", actives,
+                     liste[0] ? " ; " : "", liste);
+}
+
 void app_main(void)
 {
     /* Sorties au repos (LED IR, ampli, C6 en reset...), comme le firmware. */
@@ -640,25 +677,10 @@ void app_main(void)
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "Banc d'essai Suivi nid %s", app->version);
 
-    s_reglages = (nid_capture_settings_t) {
-        .width = CONFIG_BANC_LARGEUR,
-        .height = CONFIG_BANC_HAUTEUR,
-        .fps = CONFIG_BANC_IPS,
-        .bitrate_kbps = CONFIG_BANC_DEBIT_KBPS,
-#if CONFIG_BANC_SON
-        .audio = true,
-#endif
-        .night = false,
-        .night_mono = true,
-        .jpeg_quality = CONFIG_BANC_QUALITE_JPEG,
-        .label = BANC_ETIQUETTE,
-    };
+    /* 1. Fonctions choisies au démarrage précédent (NVS). */
+    banc_fonctions_charger();
 
-    if (banc_ecran_init() == ESP_OK) {
-        banc_ecran_ligne(BANC_LIGNE_ENTETE, BANC_GRIS, "Banc d'essai Suivi nid %s — démarrage...", app->version);
-    }
-
-    /* Bouton BOOT (actif bas, rappel sur la carte ; tirage interne en plus). */
+    /* Bouton BOOT (actif bas, rappel sur la carte ; tirage interne en plus) : sert aussi à la sélection. */
     const gpio_config_t bouton = {
         .pin_bit_mask = 1ULL << CONFIG_BANC_BOUTON_GPIO,
         .mode = GPIO_MODE_INPUT,
@@ -667,45 +689,116 @@ void app_main(void)
     if (gpio_config(&bouton) != ESP_OK) {
         ESP_LOGE(TAG, "GPIO%d du bouton invalide (menu « Banc d'essai ») : console seule", CONFIG_BANC_BOUTON_GPIO);
     }
+    esp_err_t err_i2c = nid_board_i2c_init();
+    esp_err_t err;
 
-    esp_err_t err = nid_board_i2c_init();
-    if (err != ESP_OK) {
-        banc_afficher_erreur("bus I2C", err, "Broches SDA/SCL : menu « Suivi nid — Carte et brochage »");
+    /* 2. Écran, tactile et console : ils servent à l'écran de sélection. */
+    if (banc_f_choisie(BANC_F_ECRAN)) {
+        err = banc_ecran_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_ECRAN, err);
+        }
+    }
+    if (banc_f_active(BANC_F_TACTILE)) {
+        err = banc_tactile_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_TACTILE, err);
+        }
+    }
+    bool console_lancee = false;
+    if (banc_f_choisie(BANC_F_CONSOLE)) {
+        err = banc_console_demarrer();
+        console_lancee = true;
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_CONSOLE, err);
+        }
     }
 
-    /* LED IR, IR-cut, température, batterie ; réglages et PIR. */
-    banc_tests_init();
-    err = banc_detection_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "surveillance PIR indisponible : %s", esp_err_to_name(err));
+    /* 3. Sélection (démarrage automatique sur la dernière sélection, mémorisée en NVS). */
+    banc_fonctions_selection();
+    if (banc_ecran_ok() && !banc_f_active(BANC_F_ECRAN)) {
+        banc_ecran_couper();
+    }
+    /* Fonctions d'interface réactivées pendant la sélection : initialisées maintenant. */
+    if (banc_f_active(BANC_F_ECRAN) && !banc_ecran_ok()) {
+        err = banc_ecran_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_ECRAN, err);
+        }
+    }
+    if (banc_f_active(BANC_F_TACTILE) && !banc_tactile_ok()) {
+        err = banc_tactile_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_TACTILE, err);
+        }
+    }
+    if (banc_f_choisie(BANC_F_CONSOLE) && !console_lancee) {
+        err = banc_console_demarrer();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_CONSOLE, err);
+        }
+    }
+    if (banc_ecran_ok()) {
+        banc_ecran_rect(&banc_ecran_zones()->vue, BANC_NOIR);
+        banc_ecran_rect(&banc_ecran_zones()->panneau, BANC_FOND);
+        banc_ecran_ligne(BANC_LIGNE_ENTETE, BANC_GRIS, "Banc d'essai Suivi nid %s — démarrage...", app->version);
+        banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_JAUNE, "%s", "Initialisation des fonctions choisies...");
+        banc_effacer_details();
+    }
+    if (err_i2c != ESP_OK) {
+        banc_afficher_erreur("bus I2C", err_i2c, "Broches SDA/SCL : menu « Suivi nid — Carte et brochage »");
+    }
+
+    s_reglages = (nid_capture_settings_t) {
+        .width = CONFIG_BANC_LARGEUR,
+        .height = CONFIG_BANC_HAUTEUR,
+        .fps = CONFIG_BANC_IPS,
+        .bitrate_kbps = CONFIG_BANC_DEBIT_KBPS,
+        .audio = banc_f_active(BANC_F_SON),
+        .night = false,
+        .night_mono = true,
+        .jpeg_quality = CONFIG_BANC_QUALITE_JPEG,
+        .label = BANC_ETIQUETTE,
+    };
+
+    /* 4. Chaque fonction choisie est initialisée ; un échec la met « en défaut » sans bloquer les autres. */
+    banc_tests_init();      /* nuit (LED IR, IR-cut), batterie, température selon la sélection */
+    err = banc_detection_init();    /* réglages ; PIR et interruptions si la fonction est active */
+    if (err != ESP_OK && banc_f_active(BANC_F_PIR)) {
+        banc_f_defaut(BANC_F_PIR, err);
     }
 
     bool pret = true;
-    err = banc_preparer_sd();
-    if (err != ESP_OK) {
-        banc_afficher_erreur("carte SD", err, piste_sd(err));
-        pret = false;
-    } else {
-        afficher_sd(BANC_LIGNE_DETAIL1);
-    }
-
-    banc_ecran_message_vue(BANC_GRIS, "Initialisation de la caméra...");
-    nid_capture_set_frame_hook(banc_crochet_image, NULL);
-    if (nid_board_i2c_bus() != NULL) {
-        err = preparer_camera();
+    if (banc_f_active(BANC_F_SD)) {
+        err = banc_preparer_sd();
         if (err != ESP_OK) {
-            banc_afficher_erreur("caméra", err, piste_camera(err));
+            banc_f_defaut(BANC_F_SD, err);
+            banc_afficher_erreur("carte SD", err, piste_sd(err));
             pret = false;
-        } else if (pret) {
-            banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC, "Caméra : %s prête", nid_capture_sensor_name());
+        } else {
+            afficher_sd(BANC_LIGNE_DETAIL1);
         }
     }
-    banc_nuit_actualiser(true);
 
-    /* Dalle tactile (facultative) : après la caméra, sur le même bus I2C. */
-    err = banc_tactile_init();
-    banc_ecran_ligne(BANC_LIGNE_DETAIL3, err == ESP_OK ? BANC_BLANC : BANC_GRIS, "Tactile : %s",
-                     err == ESP_OK ? banc_tactile_nom() : "absent (bouton BOOT et console)");
+    nid_capture_set_frame_hook(banc_crochet_image, NULL);
+    if (banc_f_active(BANC_F_CAMERA)) {
+        banc_ecran_message_vue(BANC_GRIS, "Initialisation de la caméra...");
+        err = (nid_board_i2c_bus() != NULL) ? preparer_camera() : ESP_ERR_INVALID_STATE;
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_CAMERA, err);
+            banc_afficher_erreur("caméra", err, piste_camera(err));
+            pret = false;
+        } else {
+            banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC, "Caméra : %s prête", nid_capture_sensor_name());
+            nid_capture_audio_level_t niveau;
+            if (s_reglages.audio && nid_capture_audio_level(100, &niveau) == ESP_ERR_NOT_SUPPORTED) {
+                banc_f_defaut(BANC_F_SON, ESP_ERR_NOT_FOUND);   /* ES8311 absent ou muet : vidéo seule */
+            }
+        }
+    } else {
+        banc_ecran_message_vue(BANC_GRIS, "Caméra désactivée");
+    }
+    banc_nuit_actualiser(true);
 
     char sd[24];
     banc_texte_sd(sd, sizeof(sd));
@@ -714,7 +807,7 @@ void app_main(void)
     nid_storage_journal("demarrage_banc", "banc %s;puce rév. %d.%d;capteur %s;%ux%u %u i/s %" PRIu32 " kbit/s son %s;SD %s",
                         app->version, chip.revision / 100, chip.revision % 100, nid_capture_sensor_name(),
                         s_reglages.width, s_reglages.height, s_reglages.fps, s_reglages.bitrate_kbps,
-                        s_reglages.audio ? "oui" : "non", sd);
+                        banc_f_active(BANC_F_SON) ? "oui" : "non", sd);
 
     s_file = xQueueCreate(1, sizeof(banc_demande_t));
     if (s_file == NULL ||
@@ -727,15 +820,13 @@ void app_main(void)
     if (pret) {
         afficher_pret();
     }
+    afficher_fonctions();
     banc_rafraichir_entete();
-    err = banc_ui_demarrer();
-    if (err != ESP_OK && banc_ecran_ok()) {
-        ESP_LOGW(TAG, "tâche d'affichage : %s", esp_err_to_name(err));
-    }
-
-    err = banc_console_demarrer();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "console série indisponible : %s (le bouton BOOT reste utilisable)", esp_err_to_name(err));
+    if (banc_f_active(BANC_F_ECRAN)) {
+        err = banc_ui_demarrer();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "tâche d'affichage : %s", esp_err_to_name(err));
+        }
     }
     ESP_LOGI(TAG, "prêt : BOOT court = armer/désarmer, BOOT long = vidéo (GPIO%d) ; « help » pour les commandes",
              CONFIG_BANC_BOUTON_GPIO);

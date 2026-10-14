@@ -489,6 +489,22 @@ bool banc_ecran_ok(void)
     return s_ec.ok;
 }
 
+void banc_ecran_couper(void)
+{
+    if (!s_ec.ok) {
+        return;
+    }
+    xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
+    remplir(0, 0, s_ec.w, s_ec.h, FOND_VUE);
+    publier(0, s_ec.h);
+    s_ec.ok = false;        /* plus aucun dessin ; le panneau reste initialisé */
+    xSemaphoreGive(s_ec.mutex);
+#if CONFIG_BANC_ECRAN_RETRO_GPIO >= 0
+    gpio_set_level(CONFIG_BANC_ECRAN_RETRO_GPIO, 0);
+#endif
+    strlcpy(s_ec.nom, "désactivé", sizeof(s_ec.nom));
+}
+
 const char *banc_ecran_nom(void)
 {
     return s_ec.nom;
@@ -746,6 +762,10 @@ esp_err_t banc_ecran_init(void)
 bool banc_ecran_ok(void)
 {
     return false;
+}
+
+void banc_ecran_couper(void)
+{
 }
 
 const char *banc_ecran_nom(void)

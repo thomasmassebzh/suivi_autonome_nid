@@ -239,11 +239,15 @@ static void nom_court(const char *nom, char *out, size_t len)
 
 static void onglet_detection(const banc_etat_t *e, int64_t now)
 {
-    const bool pir = nid_detect_pir_active();
     char t[48];
     snprintf(t, sizeof(t), "PIR (GPIO%d)", (int)nid_board_pins()->pir);
-    boite(0, t, 4, pir ? BANC_BLANC : BANC_GRIS, pir ? BANC_ROUGE_VIF : BANC_GRIS_FONCE, "%s",
-          pir ? "ACTIF" : "REPOS");
+    if (!banc_f_active(BANC_F_PIR)) {
+        boite(0, t, 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", banc_f_texte(BANC_F_PIR));
+    } else {
+        const bool pir = nid_detect_pir_active();
+        boite(0, t, 4, pir ? BANC_BLANC : BANC_GRIS, pir ? BANC_ROUGE_VIF : BANC_GRIS_FONCE, "%s",
+              pir ? "ACTIF" : "REPOS");
+    }
 
     banc_couleur_t fond;
     banc_texte_declenchement(e, now, t, sizeof(t), &fond);
@@ -293,10 +297,16 @@ static void onglet_photo(const banc_etat_t *e, int64_t now)
 {
     char nom[48];
     nom_court(e->photo_fichier, nom, sizeof(nom));
-    boite(0, "DERNIÈRE PHOTO", 3, e->photo_ok ? BANC_BLANC : BANC_GRIS, BANC_GRIS_FONCE, "%s", nom);
+    if (!banc_f_active(BANC_F_CAMERA)) {
+        boite(0, "DERNIÈRE PHOTO", 3, BANC_GRIS, BANC_GRIS_FONCE, "caméra %s", banc_f_texte(BANC_F_CAMERA));
+    } else {
+        boite(0, "DERNIÈRE PHOTO", 3, e->photo_ok ? BANC_BLANC : BANC_GRIS, BANC_GRIS_FONCE, "%s", nom);
+    }
     nid_config_t cfg;
     banc_reglages(&cfg);
-    if (cfg.photo_interval_min == 0) {
+    if (!banc_f_active(BANC_F_SUIVI)) {
+        boite(1, "PHOTO DE SUIVI", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", banc_f_texte(BANC_F_SUIVI));
+    } else if (cfg.photo_interval_min == 0) {
         boite(1, "PHOTO DE SUIVI", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "arrêtée");
     } else if (!e->arme || e->suivi_prochaine_us == 0) {
         boite(1, "PHOTO DE SUIVI", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "désarmé");
@@ -325,6 +335,16 @@ static void onglet_photo(const banc_etat_t *e, int64_t now)
 static void onglet_nuit(const banc_etat_t *e)
 {
     static const char *const modes[] = { "forcé", "forcé", "auto" };
+    if (!banc_f_active(BANC_F_NUIT)) {
+        const char *t = banc_f_texte(BANC_F_NUIT);
+        boite(0, "MODE", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", t);
+        boite(1, "LED IR 940 nm", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", t);
+        boite(2, "FILTRE IR-CUT", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", t);
+        for (int i = 0; i < NB_LIGNES; i++) {
+            ligne(i, BANC_GRIS, "%s", i == 0 ? "Fonction « nuit » non utilisée" : "");
+        }
+        return;
+    }
     boite(0, "MODE", 3, BANC_BLANC, e->nuit_active ? BANC_BLEU : BANC_GRIS_FONCE, "%s (%s)",
           e->nuit_active ? "NUIT" : "JOUR", modes[e->mode_nuit]);
     if (nid_board_pins()->ir_led == GPIO_NUM_NC) {
@@ -356,8 +376,9 @@ static void onglet_son(const banc_etat_t *e)
         valide = nid_capture_audio_last_level(&l);     /* niveau pendant l'enregistrement */
     }
     const nid_capture_settings_t *r = banc_reglages_capture();
-    if (!r->audio) {
-        boite(0, "MICRO ES8311", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "son désactivé");
+    if (!banc_f_active(BANC_F_SON)) {
+        valide = false;
+        boite(0, "MICRO ES8311", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", banc_f_texte(BANC_F_SON));
     } else {
         boite(0, "MICRO ES8311", 3, BANC_BLANC, valide ? BANC_VERT_FONCE : BANC_GRIS_FONCE, "%s",
               e->rec ? "enregistrement" : (valide ? "en écoute" : "absent ?"));
@@ -391,7 +412,9 @@ static void onglet_systeme(const banc_etat_t *e)
 {
     char t[48];
     snprintf(t, sizeof(t), "BATTERIE (GPIO%d)", (int)nid_board_pins()->batt_adc);
-    if (s_mes.batt_err == ESP_OK) {
+    if (!banc_f_active(BANC_F_BATTERIE)) {
+        boite(0, t, 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", banc_f_texte(BANC_F_BATTERIE));
+    } else if (s_mes.batt_err == ESP_OK) {
         boite(0, t, 3, BANC_BLANC, BANC_VERT_FONCE, "%" PRIu32 ".%02" PRIu32 " V", s_mes.batt_mv / 1000,
               (s_mes.batt_mv % 1000) / 10);
     } else if (s_mes.batt_err == ESP_ERR_INVALID_RESPONSE) {
@@ -399,7 +422,9 @@ static void onglet_systeme(const banc_etat_t *e)
     } else {
         boite(0, t, 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "pas de mesure");
     }
-    if (s_mes.temp_err == ESP_OK) {
+    if (!banc_f_active(BANC_F_TEMPERATURE)) {
+        boite(1, "TEMPÉRATURE PUCE", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", banc_f_texte(BANC_F_TEMPERATURE));
+    } else if (s_mes.temp_err == ESP_OK) {
         boite(1, "TEMPÉRATURE PUCE", 3, BANC_BLANC, s_mes.temp_c > 70.0f ? BANC_ORANGE : BANC_GRIS_FONCE, "%.1f °C",
               (double)s_mes.temp_c);
     } else {
@@ -407,7 +432,11 @@ static void onglet_systeme(const banc_etat_t *e)
     }
     char sd[24];
     banc_texte_sd(sd, sizeof(sd));
-    boite(2, "CARTE SD", 3, BANC_BLANC, BANC_GRIS_FONCE, "%s", sd);
+    if (!banc_f_choisie(BANC_F_SD)) {
+        boite(2, "CARTE SD", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", banc_f_texte(BANC_F_SD));
+    } else {
+        boite(2, "CARTE SD", 3, BANC_BLANC, BANC_GRIS_FONCE, "%s", sd);
+    }
 
     if (s_mes.batt_err == ESP_ERR_INVALID_RESPONSE) {
         ligne(0, BANC_JAUNE, "Lu %" PRIu32 " mV : ignoré (pas de pont)", s_mes.batt_brut_mv);

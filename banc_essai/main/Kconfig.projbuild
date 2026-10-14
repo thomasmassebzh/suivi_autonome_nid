@@ -1,5 +1,75 @@
 menu "Banc d'essai"
 
+    menu "Fonctions activées"
+        comment "Fonctions compilées ; au démarrage, un écran de sélection permet d'en désactiver"
+
+        config BANC_F_ECRAN
+            bool "Écran (tableau de bord)"
+            default y
+            depends on !BANC_ECRAN_AUCUN
+            help
+                Modèle d'écran : menu « Écran » ci-dessous. Sans écran, le banc se
+                pilote par le bouton BOOT et la console.
+
+        config BANC_TACTILE
+            bool "Dalle tactile GT911 (boutons à l'écran)"
+            default y
+            depends on BANC_F_ECRAN
+            help
+                Dalle tactile de l'écran 7 pouces du kit, sur le bus I2C partagé
+                (adresse 0x5D ou 0x14, détectée au démarrage). Absente : le banc
+                reste utilisable par le bouton BOOT et la console.
+
+        config BANC_F_CAMERA
+            bool "Caméra, vidéo et photo"
+            default y
+
+        config BANC_SON
+            bool "Son (micro ES8311, piste AAC, vumètre)"
+            default y
+            depends on BANC_F_CAMERA
+
+        config BANC_F_SD
+            bool "Carte SD (vidéos, photos, journal, tests de débit)"
+            default y
+
+        config BANC_F_PIR
+            bool "PIR et détection"
+            default y
+
+        config BANC_F_NUIT
+            bool "Nuit : LED IR, filtre IR-cut, monochrome, soleil"
+            default y
+
+        config BANC_F_BATTERIE
+            bool "Batterie (ADC)"
+            default y
+
+        config BANC_F_TEMPERATURE
+            bool "Température de la puce"
+            default y
+
+        config BANC_F_SUIVI
+            bool "Photo de suivi périodique"
+            default y
+            depends on BANC_F_CAMERA && BANC_F_SD
+
+        config BANC_F_CONSOLE
+            bool "Console série (commandes)"
+            default y
+
+        config BANC_SELECTION_S
+            int "Écran de sélection au démarrage : démarrage automatique après (s ; 0 = pas d'écran)"
+            range 0 60
+            default 5
+            help
+                Au démarrage, la liste des fonctions compilées est proposée (écran
+                tactile, bouton BOOT : appui court = suivante, appui long =
+                basculer / valider ; console : « fonctions »). Sans action, le banc
+                démarre au bout de ce délai avec la dernière sélection (mémorisée
+                en NVS).
+    endmenu
+
     comment "Bouton BOOT, vidéo manuelle (appui long ou commande « video »)"
 
     config BANC_BOUTON_GPIO
@@ -130,10 +200,6 @@ menu "Banc d'essai"
         range 100 25000
         default 4000
 
-    config BANC_SON
-        bool "Piste son (micro de la carte, AAC)"
-        default y
-
     config BANC_QUALITE_JPEG
         int "Qualité des photos JPEG (commande « photo »)"
         range 10 100
@@ -191,15 +257,6 @@ menu "Banc d'essai"
         range 1 10
         default 3
         depends on BANC_VUE_ENREG
-
-    config BANC_TACTILE
-        bool "Dalle tactile GT911 (boutons à l'écran)"
-        default y
-        depends on !BANC_ECRAN_AUCUN
-        help
-            Dalle tactile de l'écran 7 pouces du kit, sur le bus I2C partagé
-            (adresse 0x5D ou 0x14, détectée au démarrage). Absente : le banc
-            reste utilisable par le bouton BOOT et la console.
 
     config BANC_TACTILE_MIROIR_X
         bool "Tactile : miroir horizontal"

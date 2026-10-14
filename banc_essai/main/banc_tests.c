@@ -50,23 +50,31 @@ static bool s_batt_ok;
 
 void banc_tests_init(void)
 {
-    s_ir_ok = (nid_ir_init() == ESP_OK);
-    if (!s_ir_ok) {
-        ESP_LOGW(TAG, "LED IR / IR-cut indisponibles");
+    esp_err_t err;
+    if (banc_f_active(BANC_F_NUIT)) {
+        err = nid_ir_init();
+        s_ir_ok = (err == ESP_OK);
+        if (!s_ir_ok) {
+            banc_f_defaut(BANC_F_NUIT, err);
+        }
     }
-    esp_err_t err = nid_power_battery_init();
-    s_batt_ok = (err == ESP_OK);
-    if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGW(TAG, "mesure de la batterie : %s", esp_err_to_name(err));
+    if (banc_f_active(BANC_F_BATTERIE)) {
+        err = nid_power_battery_init();
+        s_batt_ok = (err == ESP_OK);
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_BATTERIE, err);    /* ESP_ERR_NOT_SUPPORTED : aucune broche configurée */
+        }
     }
-    const temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
-    err = temperature_sensor_install(&tcfg, &s_tsens);
-    if (err == ESP_OK) {
-        err = temperature_sensor_enable(s_tsens);
-    }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "capteur de température : %s", esp_err_to_name(err));
-        s_tsens = NULL;
+    if (banc_f_active(BANC_F_TEMPERATURE)) {
+        const temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+        err = temperature_sensor_install(&tcfg, &s_tsens);
+        if (err == ESP_OK) {
+            err = temperature_sensor_enable(s_tsens);
+        }
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_TEMPERATURE, err);
+            s_tsens = NULL;
+        }
     }
     banc_etat_t *e = banc_etat_verrouiller();
 #if CONFIG_BANC_NUIT_DEFAUT_AUTO
@@ -102,6 +110,9 @@ static void appliquer_nuit(bool nuit, const nid_config_t *cfg)
 
 void banc_nuit_actualiser(bool forcer)
 {
+    if (!banc_f_active(BANC_F_NUIT)) {
+        return;
+    }
     nid_config_t cfg;
     banc_reglages(&cfg);
     banc_etat_t e;
@@ -132,6 +143,9 @@ void banc_nuit_actualiser(bool forcer)
 
 esp_err_t banc_nuit_mode(banc_mode_nuit_t mode)
 {
+    if (!banc_f_active(BANC_F_NUIT)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     banc_etat_t *e = banc_etat_verrouiller();
     e->mode_nuit = mode;
     banc_etat_deverrouiller();
@@ -166,6 +180,9 @@ esp_err_t banc_ircut(bool jour)
 
 esp_err_t banc_mono(bool mono)
 {
+    if (!banc_f_active(BANC_F_NUIT)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     const esp_err_t err = nid_capture_set_night(mono);
     banc_etat_t *e = banc_etat_verrouiller();
     e->mono = (err == ESP_OK) && mono;
@@ -215,7 +232,7 @@ esp_err_t banc_batterie(uint32_t *mv, uint32_t *brut_mv)
 esp_err_t banc_temperature(float *c)
 {
     if (s_tsens == NULL) {
-        return ESP_ERR_INVALID_STATE;
+        return ESP_ERR_NOT_SUPPORTED;
     }
     return temperature_sensor_get_celsius(s_tsens, c);
 }
@@ -234,6 +251,9 @@ int banc_dbfs10(uint16_t v)
 
 void banc_son_mesurer(void)
 {
+    if (!banc_f_active(BANC_F_SON)) {
+        return;
+    }
     nid_capture_audio_level_t l;
     const esp_err_t err = nid_capture_audio_level(SON_MESURE_MS, &l);
     banc_etat_t *e = banc_etat_verrouiller();
