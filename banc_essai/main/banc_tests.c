@@ -22,6 +22,8 @@
 #include <unistd.h>
 
 #include "sdkconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "driver/temperature_sensor.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -44,6 +46,10 @@ static temperature_sensor_handle_t s_tsens;
 static bool s_ir_ok;
 static bool s_batt_ok;
 
+/* Mesures lues par l'écran, la console et la page web (plusieurs tâches). */
+static SemaphoreHandle_t s_mesure_mutex;
+static StaticSemaphore_t s_mesure_mutex_buf;
+
 /* ------------------------------------------------------------------------- */
 /* Initialisation                                                             */
 /* ------------------------------------------------------------------------- */
@@ -51,6 +57,7 @@ static bool s_batt_ok;
 void banc_tests_init(void)
 {
     esp_err_t err;
+    s_mesure_mutex = xSemaphoreCreateMutexStatic(&s_mesure_mutex_buf);
     if (banc_f_active(BANC_F_NUIT)) {
         err = nid_ir_init();
         s_ir_ok = (err == ESP_OK);
@@ -221,20 +228,25 @@ esp_err_t banc_batterie(uint32_t *mv, uint32_t *brut_mv)
 {
     *mv = 0;
     *brut_mv = 0;
-    if (!s_batt_ok) {
+    if (!s_batt_ok || s_mesure_mutex == NULL) {
         return ESP_ERR_NOT_SUPPORTED;
     }
+    xSemaphoreTake(s_mesure_mutex, portMAX_DELAY);
     const esp_err_t err = nid_power_battery_read_mv(mv);
     *brut_mv = nid_power_battery_last_raw_mv();
+    xSemaphoreGive(s_mesure_mutex);
     return err;
 }
 
 esp_err_t banc_temperature(float *c)
 {
-    if (s_tsens == NULL) {
+    if (s_tsens == NULL || s_mesure_mutex == NULL) {
         return ESP_ERR_NOT_SUPPORTED;
     }
-    return temperature_sensor_get_celsius(s_tsens, c);
+    xSemaphoreTake(s_mesure_mutex, portMAX_DELAY);
+    const esp_err_t err = temperature_sensor_get_celsius(s_tsens, c);
+    xSemaphoreGive(s_mesure_mutex);
+    return err;
 }
 
 /* ------------------------------------------------------------------------- */

@@ -7,7 +7,8 @@
  *   PHOTO     : dernière photo, photo de suivi (compte à rebours) ;
  *   NUIT      : mode, LED IR, filtre IR-cut, monochrome, lever / coucher du soleil ;
  *   SON       : vumètre du micro, trames son de la dernière vidéo ;
- *   SYSTÈME   : batterie, température de la puce, carte SD, mémoire, endurance.
+ *   SYSTÈME   : batterie, température de la puce, carte SD, mémoire, endurance ;
+ *   WI-FI     : mode, SSID, adresse, clients ou signal, firmware du C6, lien.
  * Boutons d'action (bas du panneau) : ARMER / DÉSARMER, VIDÉO (STOP pendant un
  * enregistrement), PHOTO, NUIT / JOUR.
  *
@@ -69,6 +70,7 @@ static const char *const s_noms_onglets[BANC_NB_ONGLETS] = {
     [BANC_ONGLET_NUIT] = "nuit",
     [BANC_ONGLET_SON] = "son",
     [BANC_ONGLET_SYSTEME] = "systeme",
+    [BANC_ONGLET_WIFI] = "wifi",
 };
 
 static const char *const s_titres_onglets[BANC_NB_ONGLETS] = {
@@ -77,6 +79,7 @@ static const char *const s_titres_onglets[BANC_NB_ONGLETS] = {
     [BANC_ONGLET_NUIT] = "NUIT",
     [BANC_ONGLET_SON] = "SON",
     [BANC_ONGLET_SYSTEME] = "SYSTÈME",
+    [BANC_ONGLET_WIFI] = "WI-FI",
 };
 
 static volatile banc_onglet_t s_onglet = BANC_ONGLET_DETECTION;
@@ -476,6 +479,71 @@ static void onglet_systeme(const banc_etat_t *e)
     ligne(5, BANC_GRIS, "%s", t);
 }
 
+#if CONFIG_BANC_F_WIFI
+static void onglet_wifi_actif(const banc_wifi_etat_t *w)
+{
+    const bool ap = (w->st.mode == NID_WIFI_MODE_AP);
+    const bool defaut = (banc_f_etat(BANC_F_WIFI) == BANC_FE_DEFAUT);
+    const bool perdu = (w->st.state == NID_WIFI_STATE_LINK_LOST);
+    banc_couleur_t fond = BANC_GRIS_FONCE;
+    if (w->st.state == NID_WIFI_STATE_UP) {
+        fond = BANC_VERT_FONCE;
+    } else if (w->st.state == NID_WIFI_STATE_STARTING || w->st.state == NID_WIFI_STATE_CONNECTING) {
+        fond = BANC_ORANGE;
+    } else if (defaut) {
+        fond = BANC_ROUGE_VIF;
+    }
+    boite(0, ap ? "POINT D'ACCÈS" : "STATION", 3, fond == BANC_ORANGE ? BANC_NOIR : BANC_BLANC, fond, "%s",
+          defaut ? "en défaut" : nid_wifi_state_str(w->st.state));
+    boite(1, "ADRESSE", 3, w->st.ip[0] ? BANC_BLANC : BANC_GRIS, BANC_GRIS_FONCE, "%s", w->st.ip[0] ? w->st.ip : "-");
+    if (ap) {
+        boite(2, "CLIENTS", 3, BANC_BLANC, BANC_GRIS_FONCE, "%d connecté(s)", w->st.clients);
+    } else if (w->rssi_ok) {
+        boite(2, "SIGNAL", 3, BANC_BLANC, BANC_GRIS_FONCE, "%d dBm", w->rssi);
+    } else {
+        boite(2, "SIGNAL", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "-");
+    }
+    ligne(0, BANC_BLANC, "SSID %s%s", w->st.ssid[0] ? w->st.ssid : "-", w->repli_ap ? " (repli)" : "");
+    if (w->st.ip[0]) {
+        ligne(1, BANC_BLANC, "http://%s", w->st.ip);
+    } else {
+        ligne(1, BANC_GRIS, "%s", "Pas encore d'adresse");
+    }
+    ligne(2, w->compat_ok ? BANC_GRIS : BANC_JAUNE, "C6 %s, hôte %s", w->version_c6, w->version_hote);
+    ligne(3, perdu ? BANC_ROUGE : BANC_GRIS, "Lien C6 %s ; vue %s", perdu ? "PERDU" : "ok",
+          w->vue_client ? "ouverte" : "fermée");
+    if (w->st.error[0]) {
+        ligne(4, BANC_JAUNE, "%s", w->st.error);
+    } else {
+        ligne(4, BANC_GRIS, "Page web : %" PRIu32 " requête(s)", w->requetes);
+    }
+    ligne(5, BANC_GRIS, "%s", "wifi | wifi sta <ssid> <mdp> | wifi ap");
+}
+#endif
+
+static void onglet_wifi(void)
+{
+#if CONFIG_BANC_F_WIFI
+    banc_wifi_etat_t w;
+    banc_wifi_etat(&w);
+    if (w.demarre) {
+        onglet_wifi_actif(&w);
+        return;
+    }
+#endif
+    const char *t = banc_f_texte(BANC_F_WIFI);
+    boite(0, "WI-FI (ESP32-C6)", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", t ? t : "arrêté");
+    boite(1, "ADRESSE", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "-");
+    boite(2, "CLIENTS / SIGNAL", 3, BANC_GRIS, BANC_GRIS_FONCE, "%s", "-");
+    ligne(0, BANC_GRIS, "%s", "Fonction « wifi » non utilisée");
+    ligne(1, BANC_GRIS, "%s", "Écran de sélection ou console :");
+    ligne(2, BANC_GRIS, "%s", "fonctions on wifi, puis redemarrer");
+    for (int i = 3; i < NB_LIGNES; i++) {
+        ligne(i, BANC_GRIS, "%s", "");
+    }
+}
+
+
 static void dessiner_boutons(const banc_etat_t *e)
 {
     zone_ecrire(&s_z_boutons[0], 2, BANC_BLANC, e->arme ? BANC_GRIS_FONCE : BANC_VERT_FONCE,
@@ -501,6 +569,9 @@ static void rafraichir_panneau(int64_t now)
         break;
     case BANC_ONGLET_SYSTEME:
         onglet_systeme(&e);
+        break;
+    case BANC_ONGLET_WIFI:
+        onglet_wifi();
         break;
     default:
         onglet_detection(&e, now);

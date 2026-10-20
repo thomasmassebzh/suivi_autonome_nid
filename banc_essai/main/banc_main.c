@@ -85,6 +85,12 @@ static int s_recuperes = -1;                /* fichiers renommés _INCOMPLET au 
 static bool s_viseur_demarre;
 static int s_viseur_echecs;
 
+/* Copie du bandeau (page web, même sans écran), sous s_bandeau_mux */
+#define BANDEAU_TEXTE   160
+static char s_bandeau[BANC_NB_LIGNES][BANDEAU_TEXTE];
+static banc_couleur_t s_bandeau_couleur[BANC_NB_LIGNES];
+static portMUX_TYPE s_bandeau_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* ------------------------------------------------------------------------- */
 /* État partagé                                                               */
 /* ------------------------------------------------------------------------- */
@@ -110,6 +116,35 @@ void banc_etat_deverrouiller(void)
 const nid_capture_settings_t *banc_reglages_capture(void)
 {
     return &s_reglages;
+}
+
+void banc_bandeau_noter(banc_ligne_t ligne, banc_couleur_t couleur, const char *texte)
+{
+    if (ligne >= BANC_NB_LIGNES) {
+        return;
+    }
+    portENTER_CRITICAL(&s_bandeau_mux);
+    strlcpy(s_bandeau[ligne], texte, BANDEAU_TEXTE);
+    s_bandeau_couleur[ligne] = couleur;
+    portEXIT_CRITICAL(&s_bandeau_mux);
+}
+
+void banc_bandeau_lire(banc_ligne_t ligne, char *out, size_t len, banc_couleur_t *couleur)
+{
+    if (ligne >= BANC_NB_LIGNES || len == 0) {
+        return;
+    }
+    char t[BANDEAU_TEXTE];
+    portENTER_CRITICAL(&s_bandeau_mux);
+    memcpy(t, s_bandeau[ligne], sizeof(t));
+    *couleur = s_bandeau_couleur[ligne];
+    portEXIT_CRITICAL(&s_bandeau_mux);
+    strlcpy(out, t, len);
+}
+
+bool banc_vumetre_demande(void)
+{
+    return banc_ui_onglet() == BANC_ONGLET_SON || banc_web_son_demande();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -155,6 +190,25 @@ static void regler_heure_compilation(void)
     settimeofday(&tv, NULL);
     ESP_LOGW(TAG, "heure non réglée : heure de compilation du banc utilisée (%s %s) ; "
              "la régler avec la commande « heure AAAA-MM-JJ HH:MM:SS »", __DATE__, __TIME__);
+}
+
+esp_err_t banc_regler_heure(time_t t, const char *origine)
+{
+    if (t < (time_t)HEURE_VALIDE_MIN || t >= (time_t)4102444800LL) {     /* 2024-01-01 .. 2100-01-01 */
+        return ESP_ERR_INVALID_ARG;
+    }
+    const time_t avant = time(NULL);
+    const struct timeval tv = { .tv_sec = t };
+    if (settimeofday(&tv, NULL) != 0) {
+        return ESP_FAIL;
+    }
+    char txt[24];
+    banc_heure_locale(txt, sizeof(txt), "%Y-%m-%d %H:%M:%S");
+    ESP_LOGI(TAG, "heure réglée (%s) : %s, écart %+lld s", origine, txt, (long long)(t - avant));
+    nid_storage_journal("heure_reglee", "%s (%s, écart %+lld s)", txt, origine, (long long)(t - avant));
+    banc_rafraichir_entete();
+    banc_nuit_actualiser(false);
+    return ESP_OK;
 }
 
 void banc_lire_espace_sd(void)
@@ -426,7 +480,8 @@ static void tache_action(void *arg)
     int64_t prochain_viseur = 0;
     int64_t prochain_nuit = 0;
     for (;;) {
-        const bool viseur = banc_ecran_ok() && nid_capture_is_ready();
+        /* Viseur : pour l'écran, ou pour la vue de la page web (banc sans écran). */
+        const bool viseur = (banc_ecran_ok() || banc_web_vue_active()) && nid_capture_is_ready();
         TickType_t attente = pdMS_TO_TICKS(200);
         if (viseur) {
             const int64_t reste_us = prochain_viseur - esp_timer_get_time();
@@ -452,8 +507,8 @@ static void tache_action(void *arg)
         if (banc_suivi_du() && banc_demander(BANC_ACTION_PHOTO_SUIVI, 0, 0, "suivi") == ESP_OK) {
             continue;
         }
-        /* Onglet « Son » : vumètre (~200 ms par mesure, le viseur ralentit). */
-        if (banc_ui_onglet() == BANC_ONGLET_SON && nid_capture_is_ready() && banc_f_active(BANC_F_SON)) {
+        /* Onglet « Son » ou section Son de la page web : vumètre (~200 ms par mesure, le viseur ralentit). */
+        if (banc_vumetre_demande() && nid_capture_is_ready() && banc_f_active(BANC_F_SON)) {
             banc_son_mesurer();
         }
         if (viseur) {
@@ -636,6 +691,19 @@ void banc_afficher_info(void)
            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     printf("Écran      : %s ; tactile : %s ; onglet %s\n", banc_ecran_nom(), banc_tactile_nom(),
            banc_ui_nom_onglet(banc_ui_onglet()));
+#if CONFIG_BANC_F_WIFI
+    banc_wifi_etat_t w;
+    banc_wifi_etat(&w);
+    if (w.demarre) {
+        printf("Wi-Fi      : %s « %s » %s, adresse %s ; C6 %s (« wifi » pour le détail)\n",
+               w.st.mode == NID_WIFI_MODE_AP ? "point d'accès" : "station", w.st.ssid, nid_wifi_state_str(w.st.state),
+               w.st.ip[0] ? w.st.ip : "-", w.version_c6);
+    } else
+#endif
+    {
+        const char *t = banc_f_texte(BANC_F_WIFI);
+        printf("Wi-Fi      : %s\n", t ? t : "arrêté");
+    }
     printf("État       : %s\n", e.rec ? "enregistrement en cours" : (banc_occupe() ? "action en cours" : "prêt"));
     printf("Dernier    : %s\n", banc_dernier_bilan());
 }
@@ -826,6 +894,14 @@ void app_main(void)
         err = banc_ui_demarrer();
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "tâche d'affichage : %s", esp_err_to_name(err));
+        }
+    }
+    /* Wi-Fi en dernier (comme le firmware : carte SD montée avant le transport
+     * SDIO du C6) ; démarrage en tâche de fond, un échec le met « en défaut ». */
+    if (banc_f_active(BANC_F_WIFI)) {
+        err = banc_wifi_demarrer();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_WIFI, err);
         }
     }
     ESP_LOGI(TAG, "prêt : BOOT court = armer/désarmer, BOOT long = vidéo (GPIO%d) ; « help » pour les commandes",

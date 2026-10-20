@@ -3,7 +3,8 @@
  *
  * REPL esp_console sur la console configurée (CONFIG_ESP_CONSOLE_* : port USB
  * Serial/JTAG de la P4X par défaut, ou UART), comme l'exemple d'ESP-IDF
- * examples/system/console/basic (domaine public / CC0). Les commandes qui
+ * examples/system/console/basic (domaine public / CC0). La même table de
+ * commandes sert la console de la page web (banc_console_executer). Les commandes qui
  * utilisent la caméra, le micro ou écrivent sur la carte sont confiées à la
  * tâche d'action du banc, partagée avec le bouton BOOT, l'écran tactile et le
  * PIR : jamais deux enregistrements en même temps.
@@ -452,7 +453,7 @@ static int cmd_ecran(int argc, char **argv)
             }
         }
     }
-    printf("Usage : ecran detection|photo|nuit|son|systeme   (onglet affiché : %s)\n",
+    printf("Usage : ecran detection|photo|nuit|son|systeme|wifi   (onglet affiché : %s)\n",
            banc_ui_nom_onglet(banc_ui_onglet()));
     return argc == 1 ? 0 : 1;
 }
@@ -607,16 +608,144 @@ static int cmd_heure(int argc, char **argv)
         printf("Date invalide\n");
         return 1;
     }
-    const struct timeval tv = { .tv_sec = t };
-    if (settimeofday(&tv, NULL) != 0) {
+    if (banc_regler_heure(t, "console du banc") != ESP_OK) {
         printf("Réglage de l'heure refusé\n");
         return 1;
     }
     afficher_heure();
-    nid_storage_journal("heure_reglee", "%s %s (console du banc)", argv[1], argv[2]);
-    banc_rafraichir_entete();
-    banc_nuit_actualiser(false);
     return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Table des commandes (console série et console web)                         */
+/* ------------------------------------------------------------------------- */
+
+#define LIGNE_MAX           160
+#define ARGS_MAX            12
+
+static const esp_console_cmd_t s_cmds[] = {
+    { .command = "video", .help = "Vidéo MP4 manuelle (durée par défaut : menu « Banc d'essai ») ; « video stop »",
+      .hint = "[durée_s|stop]", .func = cmd_video },
+    { .command = "photo", .help = "Photo JPEG sur la carte SD", .func = cmd_photo },
+    { .command = "armer", .help = "Arme / désarme la surveillance PIR (sans argument : état du PIR et compteurs)",
+      .hint = "[on|off]", .func = cmd_armer },
+    { .command = "compteurs", .help = "Compteurs de détection, latence ; « raz » pour les remettre à zéro",
+      .hint = "[raz]", .func = cmd_compteurs },
+    { .command = "regle", .help = "Réglages de détection, suivi et nuit à chaud (clés de config.ini)",
+      .hint = "[clé valeur]", .func = cmd_regle },
+    { .command = "suivi", .help = "Intervalle des photos de suivi en minutes (0 = arrêt)", .hint = "<min>",
+      .func = cmd_suivi },
+    { .command = "nuit", .help = "Mode jour / nuit / automatique (filtre, LED IR, monochrome)",
+      .hint = "[on|off|auto]", .func = cmd_nuit },
+    { .command = "ir", .help = "Puissance des LED IR en % (test direct)", .hint = "<0-100>", .func = cmd_ir },
+    { .command = "ircut", .help = "Filtre IR-cut (test direct)", .hint = "jour|nuit", .func = cmd_ircut },
+    { .command = "mono", .help = "Image monochrome par l'ISP (test direct)", .hint = "on|off", .func = cmd_mono },
+    { .command = "soleil", .help = "Lever et coucher du soleil du jour, décision jour/nuit du firmware",
+      .func = cmd_soleil },
+    { .command = "son", .help = "Niveau du micro (1 s) ; « son video [s] » : vidéo de test du son",
+      .hint = "[video [durée_s]]", .func = cmd_son },
+    { .command = "batterie", .help = "Tension de la batterie (ou « non câblée »)", .func = cmd_batterie },
+    { .command = "temp", .help = "Température de la puce", .func = cmd_temp },
+    { .command = "sd", .help = "Volume de la carte ; « sd test [Mo] » : débit ; « sd scan » : recompte le libre",
+      .hint = "[test [Mo]|scan]", .func = cmd_sd },
+    { .command = "boucle", .help = "Endurance : N vidéos d'affilée, bilan mémoire et images perdues",
+      .hint = "N [durée_s] | stop", .func = cmd_boucle },
+    { .command = "ecran", .help = "Onglet de l'écran", .hint = "detection|photo|nuit|son|systeme|wifi",
+      .func = cmd_ecran },
+    { .command = "fonctions", .help = "Fonctions à tester : liste ; on|off <nom> (mémorisé) ; go (fin de la sélection)",
+      .hint = "[on|off <nom> | go]", .func = cmd_fonctions },
+#if CONFIG_BANC_F_WIFI
+    { .command = "wifi", .help = "Wi-Fi : état (mode, SSID, adresse, clients, firmware du C6) ; ap ; sta <ssid> [mdp] "
+                              "(mémorisé) ; oublier ; on|off",
+      .hint = "[ap | sta <ssid> [mdp] | oublier | on | off]", .func = banc_wifi_commande },
+#endif
+    { .command = "redemarrer", .help = "Redémarre la carte (carte SD démontée proprement)", .func = cmd_redemarrer },
+    { .command = "info", .help = "Capteur, réglages, compteurs, carte SD, mémoire, version, dernier bilan",
+      .func = cmd_info },
+    { .command = "i2cscan", .help = "Liste les périphériques du bus I2C partagé (caméra, codec, tactile, horloge)",
+      .func = cmd_i2cscan },
+    { .command = "heure", .help = "Affiche ou règle l'heure locale", .hint = "[AAAA-MM-JJ HH:MM:SS]",
+      .func = cmd_heure },
+};
+
+#define NB_CMDS (sizeof(s_cmds) / sizeof(s_cmds[0]))
+
+/** « help » de la console web (la console série garde celui d'esp_console). */
+static void aide(void)
+{
+    for (size_t i = 0; i < NB_CMDS; i++) {
+        printf("%s %s\n  %s\n", s_cmds[i].command, s_cmds[i].hint ? s_cmds[i].hint : "", s_cmds[i].help);
+    }
+}
+
+esp_err_t banc_console_executer(const char *ligne, int *code)
+{
+    *code = 1;
+    const size_t n = strlen(ligne);
+    if (n == 0 || n >= LIGNE_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Copie locale : esp_console_run() partage un tampon global avec la console série. */
+    char buf[LIGNE_MAX];
+    strlcpy(buf, ligne, sizeof(buf));
+    char *argv[ARGS_MAX + 1] = { 0 };
+    const size_t argc = esp_console_split_argv(buf, argv, ARGS_MAX + 1);
+    if (argc == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (argc > ARGS_MAX) {
+        printf("Trop d'arguments (%d au plus)\n", ARGS_MAX);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strcmp(argv[0], "help") == 0 || strcmp(argv[0], "aide") == 0) {
+        aide();
+        *code = 0;
+        return ESP_OK;
+    }
+    for (size_t i = 0; i < NB_CMDS; i++) {
+        if (strcmp(argv[0], s_cmds[i].command) == 0) {
+            *code = s_cmds[i].func((int)argc, argv);
+            return ESP_OK;
+        }
+    }
+    printf("Commande inconnue : %s (« help » pour la liste)\n", argv[0]);
+    return ESP_ERR_NOT_FOUND;
+}
+
+void banc_console_masquer(const char *ligne, char *out, size_t len)
+{
+    strlcpy(out, ligne, len);
+    /* « wifi sta <ssid> <mdp> » : le mot de passe n'apparaît dans aucun journal. */
+    char *p = out;
+    while (*p == ' ') {
+        p++;
+    }
+    if (strncmp(p, "wifi", 4) != 0 || (p[4] != ' ' && p[4] != '\0')) {
+        return;
+    }
+    p += 4;
+    while (*p == ' ') {
+        p++;
+    }
+    if (strncmp(p, "sta ", 4) != 0) {
+        return;
+    }
+    p += 4;
+    while (*p == ' ') {
+        p++;
+    }
+    /* SSID (éventuellement entre guillemets), puis tout le reste masqué. */
+    if (*p == '"') {
+        char *fin = strchr(p + 1, '"');
+        p = (fin != NULL) ? fin + 1 : p + strlen(p);
+    } else {
+        while (*p != '\0' && *p != ' ') {
+            p++;
+        }
+    }
+    if (*p != '\0' && (size_t)(p - out) + 5 < len) {
+        strcpy(p, " ****");
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -625,49 +754,9 @@ static int cmd_heure(int argc, char **argv)
 
 esp_err_t banc_console_demarrer(void)
 {
-    static const esp_console_cmd_t cmds[] = {
-        { .command = "video", .help = "Vidéo MP4 manuelle (durée par défaut : menu « Banc d'essai ») ; « video stop »",
-          .hint = "[durée_s|stop]", .func = cmd_video },
-        { .command = "photo", .help = "Photo JPEG sur la carte SD", .func = cmd_photo },
-        { .command = "armer", .help = "Arme / désarme la surveillance PIR (sans argument : état du PIR et compteurs)",
-          .hint = "[on|off]", .func = cmd_armer },
-        { .command = "compteurs", .help = "Compteurs de détection, latence ; « raz » pour les remettre à zéro",
-          .hint = "[raz]", .func = cmd_compteurs },
-        { .command = "regle", .help = "Réglages de détection, suivi et nuit à chaud (clés de config.ini)",
-          .hint = "[clé valeur]", .func = cmd_regle },
-        { .command = "suivi", .help = "Intervalle des photos de suivi en minutes (0 = arrêt)", .hint = "<min>",
-          .func = cmd_suivi },
-        { .command = "nuit", .help = "Mode jour / nuit / automatique (filtre, LED IR, monochrome)",
-          .hint = "[on|off|auto]", .func = cmd_nuit },
-        { .command = "ir", .help = "Puissance des LED IR en % (test direct)", .hint = "<0-100>", .func = cmd_ir },
-        { .command = "ircut", .help = "Filtre IR-cut (test direct)", .hint = "jour|nuit", .func = cmd_ircut },
-        { .command = "mono", .help = "Image monochrome par l'ISP (test direct)", .hint = "on|off", .func = cmd_mono },
-        { .command = "soleil", .help = "Lever et coucher du soleil du jour, décision jour/nuit du firmware",
-          .func = cmd_soleil },
-        { .command = "son", .help = "Niveau du micro (1 s) ; « son video [s] » : vidéo de test du son",
-          .hint = "[video [durée_s]]", .func = cmd_son },
-        { .command = "batterie", .help = "Tension de la batterie (ou « non câblée »)", .func = cmd_batterie },
-        { .command = "temp", .help = "Température de la puce", .func = cmd_temp },
-        { .command = "sd", .help = "Volume de la carte ; « sd test [Mo] » : débit ; « sd scan » : recompte le libre",
-          .hint = "[test [Mo]|scan]", .func = cmd_sd },
-        { .command = "boucle", .help = "Endurance : N vidéos d'affilée, bilan mémoire et images perdues",
-          .hint = "N [durée_s] | stop", .func = cmd_boucle },
-        { .command = "ecran", .help = "Onglet de l'écran", .hint = "detection|photo|nuit|son|systeme",
-          .func = cmd_ecran },
-        { .command = "fonctions", .help = "Fonctions à tester : liste ; on|off <nom> (mémorisé) ; go (fin de la sélection)",
-          .hint = "[on|off <nom> | go]", .func = cmd_fonctions },
-        { .command = "redemarrer", .help = "Redémarre la carte (carte SD démontée proprement)", .func = cmd_redemarrer },
-        { .command = "info", .help = "Capteur, réglages, compteurs, carte SD, mémoire, version, dernier bilan",
-          .func = cmd_info },
-        { .command = "i2cscan", .help = "Liste les périphériques du bus I2C partagé (caméra, codec, tactile, horloge)",
-          .func = cmd_i2cscan },
-        { .command = "heure", .help = "Affiche ou règle l'heure locale", .hint = "[AAAA-MM-JJ HH:MM:SS]",
-          .func = cmd_heure },
-    };
-
     ESP_RETURN_ON_ERROR(esp_console_register_help_command(), TAG, "commande help");
-    for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
-        ESP_RETURN_ON_ERROR(esp_console_cmd_register(&cmds[i]), TAG, "commande %s", cmds[i].command);
+    for (size_t i = 0; i < NB_CMDS; i++) {
+        ESP_RETURN_ON_ERROR(esp_console_cmd_register(&s_cmds[i]), TAG, "commande %s", s_cmds[i].command);
     }
 
     esp_console_repl_t *repl = NULL;

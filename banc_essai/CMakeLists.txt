@@ -14,7 +14,8 @@ set(PROJECT_VER "0.1.0")
 
 # Composants du firmware utilisés par le banc (leurs propres dépendances
 # suivent par REQUIRES / PRIV_REQUIRES et par leurs idf_component.yml).
-set(BANC_COMPOSANTS_FIRMWARE nid_board nid_capture nid_storage nid_config nid_detect nid_ir nid_power nid_clock)
+# nid_wifi : Wi-Fi par le coprocesseur ESP32-C6, commun avec le mode installation.
+set(BANC_COMPOSANTS_FIRMWARE nid_board nid_capture nid_storage nid_config nid_detect nid_ir nid_power nid_clock nid_wifi)
 get_filename_component(NID_COMPOSANTS "${CMAKE_CURRENT_LIST_DIR}/../firmware/components" ABSOLUTE)
 foreach(composant ${BANC_COMPOSANTS_FIRMWARE})
     list(APPEND EXTRA_COMPONENT_DIRS "${NID_COMPOSANTS}/${composant}")

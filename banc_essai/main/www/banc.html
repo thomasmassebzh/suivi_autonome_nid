@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banc d'essai Suivi nid</title>
+<style>
+:root{--fond:#10101c;--carte:#1b1b2b;--bord:#33334a;--texte:#eee;--gris:#999;--vert:#46e646;--vertf:#007828;--jaune:#ffc800;--rouge:#ff4646;--rougev:#dc0000;--orange:#e67800;--bleu:#1e5ac8;--grisf:#3c3c46}
+*{box-sizing:border-box}
+body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:8px 12px;background:#000;border-bottom:1px solid var(--bord)}
+header b{font-size:16px}
+#lien{margin-left:auto;font-size:13px}
+.bandeau{padding:6px 12px;font-weight:600;border-bottom:1px solid var(--bord)}
+#details div{padding:1px 12px;font-size:13px}
+main{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:10px;padding:10px}
+section{background:var(--carte);border:1px solid var(--bord);border-radius:8px;padding:10px;min-width:0}
+section.large{grid-column:1/-1}
+h2{margin:0 0 8px;font-size:14px;letter-spacing:.05em;color:var(--gris);text-transform:uppercase}
+.pastille{display:inline-block;padding:6px 10px;border-radius:6px;background:var(--grisf);font-weight:700;margin:2px 0;min-width:120px;text-align:center}
+.grande{font-size:22px}
+.l{display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-bottom:1px dotted #2a2a3c}
+.l span:first-child{color:var(--gris)}
+.l span:last-child{text-align:right;overflow-wrap:anywhere}
+button,select,input{font:inherit;color:var(--texte);background:var(--grisf);border:1px solid var(--bord);border-radius:6px;padding:8px 10px}
+button{cursor:pointer;font-weight:600}
+button:active{background:#fff;color:#000}
+button.p{background:var(--bleu)}button.v{background:var(--vertf)}button.r{background:var(--rougev)}
+input[type=number]{width:5.5em}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
+.btns button{flex:1 1 auto}
+.vue{position:relative;background:#000;border-radius:6px;min-height:120px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.vue img{max-width:100%;display:block}
+#vue-msg{color:var(--gris);padding:20px;text-align:center}
+.barre{height:22px;background:var(--grisf);border-radius:4px;position:relative;overflow:hidden}
+.barre i{position:absolute;left:0;top:0;bottom:0;background:var(--bleu)}
+.barre b{position:absolute;top:0;bottom:0;width:3px;background:#fff}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:4px;border-bottom:1px solid #2a2a3c;text-align:left;vertical-align:top}
+td.n{text-align:right;white-space:nowrap}
+a{color:#8cb4ff}
+pre{margin:0;max-height:320px;overflow:auto;background:#000;padding:8px;border-radius:6px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+form.c{display:flex;gap:6px;margin-top:6px}form.c input{flex:1;min-width:0}
+.reg{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center;font-size:13px}
+.c-blanc{color:#fff}.c-gris{color:var(--gris)}.c-vert{color:var(--vert)}.c-jaune{color:var(--jaune)}.c-rouge{color:var(--rouge)}
+.f-vertf{background:var(--vertf)}.f-rougev{background:var(--rougev)}.f-orange{background:var(--orange);color:#000}.f-bleu{background:var(--bleu)}.f-grisf{background:var(--grisf)}.f-gris{background:#555}
+.note{font-size:12px;color:var(--gris);margin:4px 0 0}
+</style>
+</head>
+<body>
+<header><b>Banc d'essai Suivi nid</b><span id="heure">--</span><span id="lien" class="c-gris">connexion…</span></header>
+<div id="etat" class="bandeau c-gris">Chargement…</div>
+<div id="details"></div>
+<main>
+<section class="large" id="s-vue"><h2>Vue caméra</h2>
+<div class="vue"><img id="vue" alt="" hidden><div id="vue-msg">Vue fermée (une seule à la fois ; cadence réduite pendant un enregistrement)</div></div>
+<div class="btns"><button id="b-vue" class="p">Afficher la vue</button></div></section>
+
+<section><h2>Actions</h2>
+<div class="btns"><button id="b-armer" class="v">ARMER</button><button id="b-video" class="p">VIDÉO</button><button id="b-photo" class="p">PHOTO</button></div>
+<div class="btns"><span style="align-self:center">Durée (s)</span><input id="duree" type="number" min="1" max="300" value="10"></div>
+<div class="btns"><button data-c="nuit on">NUIT</button><button data-c="nuit off">JOUR</button><button data-c="nuit auto">AUTO</button></div>
+<div class="btns"><span style="align-self:center">LED IR</span><input id="ir" type="range" min="0" max="100" value="0" style="flex:1"><span id="ir-v" style="align-self:center;width:3em">0 %</span><button id="b-ir">Appliquer</button></div>
+<div class="btns"><button data-c="ircut jour">IR-cut jour</button><button data-c="ircut nuit">IR-cut nuit</button></div>
+<div class="btns"><button data-c="mono on">Mono</button><button data-c="mono off">Couleur</button><button id="b-heure">Mettre à l'heure</button></div>
+<p class="note" id="msg-action"></p></section>
+
+<section><h2>Détection</h2>
+<div class="btns"><div><div class="note" id="pir-t">PIR</div><div id="pir" class="pastille grande">-</div></div>
+<div><div class="note">DÉCLENCHEMENT</div><div id="decl" class="pastille">-</div></div></div>
+<div class="note">ENREGISTREMENT</div><div id="rec" class="pastille grande" style="width:100%">REC OFF</div>
+<div id="det"></div></section>
+
+<section><h2>Photo</h2><div id="photo"></div></section>
+<section><h2>Nuit</h2><div id="nuit"></div></section>
+<section id="s-son"><h2>Son</h2>
+<div class="barre"><i id="son-b" style="width:0"></i><b id="son-c" style="left:-9px"></b></div>
+<div id="son"></div><p class="note">Barre : niveau efficace, trait blanc : crête (-60 à 0 dBFS). Parler : la barre monte ; silence &lt; -50 dBFS.</p></section>
+<section><h2>Système</h2><div id="sys"></div></section>
+<section><h2>Wi-Fi</h2><div id="wifi"></div></section>
+<section><h2>Fonctions</h2><div id="fonctions"></div><p class="note">Activer / désactiver : console « fonctions on|off &lt;nom&gt; » puis « redemarrer ».</p></section>
+
+<section class="large"><h2>Réglages à chaud (regle)</h2>
+<div class="reg" id="reg"></div>
+<div class="btns"><button id="b-reg" class="p">Appliquer les modifications</button><button id="b-reg-l">Recharger</button></div>
+<p class="note">Syntaxe et plages de config.ini ; chaque valeur modifiée est envoyée par la commande « regle clé valeur ».</p></section>
+
+<section class="large"><h2>Fichiers de la carte SD</h2>
+<div class="btns" id="chemin"></div>
+<div style="overflow-x:auto"><table><thead><tr><th>Nom</th><th>Taille</th><th>Date</th><th></th></tr></thead><tbody id="fic"></tbody></table></div>
+<p class="note" id="fic-msg"></p></section>
+
+<section class="large"><h2>Console</h2>
+<pre id="sortie">Mêmes commandes que la console série (« help » pour la liste).
+</pre>
+<form class="c" id="f-cmd"><input id="cmd" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="159" placeholder="commande (ex. info, sd test, regle sensibilite 2)"><button class="p">Envoyer</button></form></section>
+</main>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const lignes=t=>t.map(([a,b,c])=>`<div class="l"><span>${esc(a)}</span><span${c?` class="c-${c}"`:""}>${esc(b)}</span></div>`).join("");
+const mo=o=>(o/1e6).toFixed(o<1e8?1:0)+" Mo";
+const go=o=>(o/1e9).toFixed(1)+" Go";
+const taille=o=>o<1e3?o+" o":o<1e6?(o/1e3).toFixed(0)+" ko":mo(o);
+const db=v=>(v/10).toFixed(1)+" dBFS";
+let E=null,heureFaite=false,sonVisible=false,dossier=null,hist=[],ih=0;
+
+function masquer(c){return c.replace(/^(\s*wifi\s+sta\s+("[^"]*"|\S+))\s+.*$/,"$1 ****");}
+function journal(t){const p=$("sortie");p.textContent+=t+(t.endsWith("\n")?"":"\n");p.scrollTop=p.scrollHeight;}
+async function post(url,donnees){
+  const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(donnees).toString()});
+  let j=null;try{j=await r.json();}catch(e){j={ok:false,message:"Réponse illisible ("+r.status+")"};}
+  return j;
+}
+async function cmd(c,silencieux){
+  journal("> "+masquer(c));
+  try{const j=await post("/api/console",{c});
+    journal(j.sortie!=null?(j.sortie||"(aucune sortie)"):(j.message||""));
+    if(!silencieux)$("msg-action").textContent=(j.sortie||j.message||"").split("\n")[0];
+    setTimeout(etat,300);return j;
+  }catch(e){journal("Erreur : banc injoignable");return null;}
+}
+
+function pastille(el,texte,fond){el.textContent=texte;el.className=el.className.replace(/\bf-\S+/g,"").trim()+" f-"+fond;}
+function afficher(e){
+  E=e;
+  $("heure").textContent=e.heure;
+  const b=e.bandeau||[];
+  if(b.length){$("etat").textContent=b[1].t||"";$("etat").className="bandeau c-"+b[1].c;
+    $("details").innerHTML=b.slice(2).map(x=>x.t?`<div class="c-${x.c}">${esc(x.t)}</div>`:"").join("");}
+  // Détection
+  $("pir-t").textContent="PIR (GPIO"+e.pir.gpio+")";
+  pastille($("pir"),e.pir.etat,e.pir.etat=="ACTIF"?"rougev":"grisf");
+  pastille($("decl"),e.declenchement.texte,e.declenchement.c);
+  if(e.rec.on)pastille($("rec"),"● REC "+e.rec.ecoule_s+"/"+e.rec.duree_s+" s ("+e.rec.motif+")","rougev");
+  else pastille($("rec"),e.occupe?"action en cours":"REC OFF",e.occupe?"orange":"grisf");
+  $("b-armer").textContent=e.arme?"DÉSARMER":"ARMER";$("b-armer").className=e.arme?"":"v";
+  $("b-video").textContent=(e.rec.on||e.boucle.en_cours)?"STOP":"VIDÉO";$("b-video").className=(e.rec.on||e.boucle.en_cours)?"r":"p";
+  const c=e.compteurs,rg=e.reglages;
+  $("det").innerHTML=lignes([
+    ["Fronts / détections",c.fronts+" / "+c.detections],
+    ["Séquences / fausses",c.sequences+" / "+c.fausses,c.fausses?"jaune":""],
+    ["Ignorés",c.ignorees+(c.ignorees?" ("+c.motif+")":"")],
+    ["Latence front → image",e.latence_ms>=0?e.latence_ms+" ms":"-",e.latence_ms>=0?(e.latence_ms<=1000?"vert":"jaune"):""],
+    ["Dernier fichier",e.dernier],
+    e.rec.on?["Images reçues",e.rec.images+" ("+(e.rec.ips10/10).toFixed(1)+" i/s)"]:["Séquence, délai, sensibilité",rg.sequence_s+" s, "+rg.delai_s+" s, "+rg.sensibilite],
+    ["Dernière vidéo",e.video.duree_ms?(e.video.duree_ms/1000).toFixed(1)+" s, "+e.video.images+" images, "+e.video.perdues+" perdue(s)":"-",e.video.perdues?"jaune":""],
+  ]);
+  const p=e.photo;
+  $("photo").innerHTML=lignes([
+    ["Dernière photo",p.fichier,p.ok?"":"gris"],
+    ["Taille, durée",p.ko?p.ko+" ko, "+p.ms+" ms":"-"],
+    ["Photos (suivi)",p.nb+" ("+p.suivi_nb+")"],
+    ["Photo de suivi",p.suivi!="active"?p.suivi:(p.suivi_reste_s>=0?"dans "+Math.floor(p.suivi_reste_s/60)+" min "+String(p.suivi_reste_s%60).padStart(2,"0")+" s":(rg.suivi_min?"désarmé":"arrêtée"))],
+    ["Intervalle",rg.suivi_min+" min"],
+  ]);
+  const n=e.nuit;
+  $("nuit").innerHTML=n.fonction!="active"?lignes([["Fonction nuit",n.fonction,"gris"]]):lignes([
+    ["Mode",(n.active?"NUIT":"JOUR")+" ("+(n.mode=="auto"?"auto":"forcé")+")",n.active?"":"jaune"],
+    ["LED IR",n.ir_cable?n.ir+" %":"non câblée",n.ir?"rouge":""],
+    ["Filtre IR-cut",n.filtre<0?"non câblé":(n.filtre?"jour (en place)":"nuit (retiré)")],
+    ["Image",n.mono?"monochrome":"couleur"],
+    ["Lever / coucher",n.lever+" / "+n.coucher],
+    ["Décision du firmware",n.firmware_nuit?"NUIT":"JOUR"],
+  ]);
+  if(document.activeElement!==$("ir")){$("ir").value=n.ir;$("ir-v").textContent=n.ir+" %";}
+  const s=e.son,pm=v=>Math.max(0,Math.min(100,(v+600)/6));
+  $("son-b").style.width=(s.valide?pm(s.rms_db10):0)+"%";$("son-c").style.left=s.valide?"calc("+pm(s.crete_db10)+"% - 3px)":"-9px";
+  $("son").innerHTML=lignes([["Micro",s.fonction!="active"?s.fonction:(e.rec.on?"enregistrement":(s.valide?"en écoute":"pas de mesure"))],
+    ["Efficace / crête",s.valide?db(s.rms_db10)+" / "+db(s.crete_db10):"-",s.valide&&s.crete_db10>-10?"rouge":""],
+    ["Trames son (dernière vidéo)",e.video.duree_ms?e.video.trames_son+" (attendu ~"+Math.round(e.video.duree_ms/64)+")":"-",e.video.duree_ms&&!e.video.trames_son?"jaune":""]]);
+  const bt=e.batterie,sd=e.sd,m=e.memoire,bc=e.boucle;
+  $("sys").innerHTML=lignes([
+    ["Caméra",e.camera.fonction=="active"?e.camera.capteur+" — "+e.camera.reglages:e.camera.fonction,e.camera.fonction=="active"?"":"gris"],
+    ["Batterie",bt.fonction!="active"?bt.fonction:(bt.etat=="ok"?(bt.mv/1000).toFixed(2)+" V":(bt.etat=="non_cablee"?"non câblée ("+bt.brut_mv+" mV lus)":"pas de mesure")),bt.etat=="non_cablee"?"jaune":""],
+    ["Température puce",e.temperature.c10==null?e.temperature.fonction:(e.temperature.c10/10).toFixed(1)+" °C",e.temperature.c10>700?"jaune":""],
+    ["Carte SD",sd.fonction!="active"?sd.fonction:(sd.montee?go(sd.libre)+" libres / "+go(sd.volume)+" (FAT"+sd.fat+")":"absente"),sd.montee?"":"rouge"],
+    ["Débit SD (sd test)",sd.test?(sd.debit_ko_s/1000).toFixed(2)+" Mo/s, max "+sd.latence_max_ms+" ms":"-",sd.test&&sd.latence_max_ms>=500?"jaune":""],
+    ["Mémoire interne (min)",m.interne_ko+" ko ("+m.interne_min_ko+" ko)"],
+    ["PSRAM libre",m.psram_ko+" ko"],
+    ["Endurance",bc.en_cours?"boucle "+bc.i+"/"+bc.n+", "+bc.echecs+" échec(s)":(bc.faite?bc.n+" vidéos, "+bc.perdues+" perdues, "+(bc.delta_interne_ko>=0?"+":"")+bc.delta_interne_ko+" ko":"-"),bc.faite&&(bc.echecs||bc.perdues)?"jaune":""],
+    ["Version, en marche depuis",e.version+", "+Math.floor(e.uptime_s/3600)+" h "+Math.floor(e.uptime_s%3600/60)+" min"],
+  ]);
+  const w=e.wifi;
+  $("wifi").innerHTML=lignes([
+    ["Mode",w.mode+(w.repli?" (repli)":"")],["État",w.etat,w.etat=="prêt"?"vert":"jaune"],["SSID",w.ssid],["Adresse",w.ip||"-"],
+    w.mode=="station"?["Signal",w.rssi==null?"-":w.rssi+" dBm"]:["Clients",w.clients+" (canal "+w.canal+")"],
+    ["Lien C6",w.lien,w.lien=="ok"?"":"rouge"],["Firmware C6 / hôte",w.c6+" / "+w.hote,w.compat_ok?"":"jaune"],["Compatibilité",w.compat],
+    ["Vue",w.vue?"ouverte, "+(w.vue_ips10/10).toFixed(1)+" i/s":"fermée"],["Requêtes",w.requetes]].concat(w.erreur?[["Erreur",w.erreur,"jaune"]]:[]));
+  $("fonctions").innerHTML=lignes(e.fonctions.map(f=>[f.libelle+" ("+f.nom+")",f.etat,f.etat=="active"?"vert":(f.etat=="en défaut"?"rouge":"gris")]));
+  if(!heureFaite){heureFaite=true;if(Math.abs(e.epoch-Date.now()/1000)>5)mettreALHeure(true);}
+}
+
+async function etat(){
+  try{const r=await fetch("/api/etat"+(sonVisible?"?son=1":""),{cache:"no-store"});
+    if(!r.ok)throw 0;afficher(await r.json());$("lien").textContent="● en ligne";$("lien").className="c-vert";
+  }catch(e){$("lien").textContent="● hors ligne";$("lien").className="c-rouge";}
+}
+async function boucle(){await etat();setTimeout(boucle,1000);}
+
+async function mettreALHeure(auto){
+  const j=await post("/api/heure",{epoch:Math.round(Date.now()/1000)});
+  const t=(auto?"Mise à l'heure automatique (écart > 5 s) : ":"")+(j.message||"");
+  $("msg-action").textContent=t;journal(t);etat();
+}
+
+// Vue caméra
+let vueOn=false;
+function vue(on){
+  vueOn=on;const img=$("vue"),msg=$("vue-msg");
+  if(on){img.hidden=false;msg.hidden=true;img.src="/stream?t="+Date.now();$("b-vue").textContent="Masquer la vue";}
+  else{img.removeAttribute("src");img.hidden=true;msg.hidden=false;$("b-vue").textContent="Afficher la vue";}
+}
+$("vue").onerror=()=>{if(!vueOn)return;vue(false);$("vue-msg").textContent="Vue refusée ou interrompue : déjà ouverte sur un autre appareil, caméra désactivée ou sans image. Réessayer.";};
+$("b-vue").onclick=()=>{vue(!vueOn);if(!vueOn)$("vue-msg").textContent="Vue fermée";};
+
+// Actions
+$("b-armer").onclick=()=>cmd(E&&E.arme?"armer off":"armer on");
+$("b-video").onclick=()=>cmd(E&&(E.rec.on||E.boucle.en_cours)?"video stop":"video "+Math.max(1,Math.min(300,parseInt($("duree").value)||10)));
+$("b-photo").onclick=()=>cmd("photo");
+document.querySelectorAll("button[data-c]").forEach(b=>b.onclick=()=>cmd(b.dataset.c));
+$("ir").oninput=()=>$("ir-v").textContent=$("ir").value+" %";
+$("b-ir").onclick=()=>cmd("ir "+$("ir").value);
+$("b-heure").onclick=()=>mettreALHeure(false);
+
+// Réglages
+let reg0={};
+async function reglages(){
+  try{const r=await fetch("/api/reglages",{cache:"no-store"});reg0=await r.json();}catch(e){return;}
+  $("reg").innerHTML=Object.keys(reg0).map(k=>`<label for="r-${k}">${esc(k)}</label><input id="r-${k}" data-k="${esc(k)}" value="${esc(reg0[k])}" maxlength="24" size="10">`).join("");
+}
+$("b-reg").onclick=async()=>{
+  for(const i of document.querySelectorAll("#reg input")){const k=i.dataset.k,v=i.value.trim();
+    if(v!==reg0[k]){if(!/^[-+.\w]{1,24}$/.test(v)){journal("Valeur refusée pour "+k);continue;}await cmd("regle "+k+" "+v,true);}}
+  reglages();
+};
+$("b-reg-l").onclick=reglages;
+
+// Fichiers
+async function fichiers(d){
+  let url="/api/fichiers";if(d!=null)url+="?d="+encodeURIComponent(d);
+  let j;try{const r=await fetch(url,{cache:"no-store"});j=await r.json();}catch(e){$("fic-msg").textContent="Liste illisible";return;}
+  if(!j.ok){$("fic-msg").textContent=j.message||"Erreur";$("fic").innerHTML="";return;}
+  dossier=j.dossier;
+  const parts=j.dossier?j.dossier.split("/"):[];let acc="";
+  $("chemin").innerHTML=`<button data-d="">carte SD</button>`+parts.map(p=>{acc+=(acc?"/":"")+p;return `<button data-d="${esc(acc)}">${esc(p)}</button>`;}).join("")+`<button data-d="${esc(j.dossier)}">↻</button>`;
+  $("chemin").querySelectorAll("button").forEach(b=>b.onclick=()=>fichiers(b.dataset.d));
+  const ent=j.entrees.sort((a,b)=>(b.r-a.r)||a.n.localeCompare(b.n));
+  const ch=n=>(j.dossier?j.dossier+"/":"")+n;
+  $("fic").innerHTML=ent.map(x=>{const f=encodeURIComponent(ch(x.n));
+    if(x.r)return `<tr><td><a href="#" data-d="${esc(ch(x.n))}">▸ ${esc(x.n)}/</a></td><td></td><td>${esc(x.m)}</td><td></td></tr>`;
+    const vue=/\.(jpe?g|csv|txt|ini)$/i.test(x.n)&&x.v?` <a href="/fichier?f=${f}&vue=1" target="_blank">voir</a>`:"";
+    return `<tr><td>${x.v?`<a href="/fichier?f=${f}" download>${esc(x.n)}</a>`:esc(x.n)}${vue}</td><td class="n">${taille(x.t)}</td><td>${esc(x.m)}</td><td>${x.v&&j.suppression?`<button data-s="${esc(ch(x.n))}" class="r">×</button>`:""}</td></tr>`;}).join("");
+  $("fic").querySelectorAll("a[data-d]").forEach(a=>a.onclick=ev=>{ev.preventDefault();fichiers(a.dataset.d);});
+  $("fic").querySelectorAll("button[data-s]").forEach(b=>b.onclick=async()=>{
+    if(!confirm("Supprimer définitivement "+b.dataset.s+" de la carte SD ?"))return;
+    const r=await post("/api/supprimer",{f:b.dataset.s});$("fic-msg").textContent=r.message||"";fichiers(dossier);});
+  $("fic-msg").textContent=ent.length+" élément(s)"+(j.tronque?" (liste tronquée)":"")+". Téléchargement par blocs : un fichier à la fois, plus lent pendant un enregistrement.";
+}
+
+// Console
+$("f-cmd").onsubmit=ev=>{ev.preventDefault();const c=$("cmd").value.trim();if(!c)return;hist.push(c);ih=hist.length;$("cmd").value="";cmd(c,true);};
+$("cmd").onkeydown=ev=>{if(ev.key=="ArrowUp"&&ih>0){$("cmd").value=hist[--ih];ev.preventDefault();}
+  else if(ev.key=="ArrowDown"&&ih<hist.length){ih++;$("cmd").value=hist[ih]||"";ev.preventDefault();}};
+
+if("IntersectionObserver" in window)new IntersectionObserver(es=>{sonVisible=es[0].isIntersecting;}).observe($("s-son"));
+boucle();reglages();fichiers(null);
+</script>
+</body>
+</html>

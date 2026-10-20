@@ -1,8 +1,8 @@
 # Valeurs par défaut du banc d'essai — ESP32-P4X-Function-EV-Board
 #
 # Reprend de firmware/sdkconfig.defaults les sections puce, flash, PSRAM,
-# carte SD, caméra et audio (le banc teste le même chemin que le firmware de
-# terrain), sans la veille profonde ni le Wi-Fi. Fichier lu à la création de
+# carte SD, caméra, audio et Wi-Fi (le banc teste le même chemin que le
+# firmware de terrain), sans la veille profonde. Fichier lu à la création de
 # `sdkconfig` (première compilation, ou après « ESP-IDF: Full Clean »).
 # Réglages propres au banc : menu « Banc d'essai » (SDK Configuration Editor).
 
@@ -87,3 +87,15 @@ CONFIG_ESP_MUXER_MP4_SUPPORT=y
 # ----------------------------------------------------------------------------
 CONFIG_CODEC_ES8311_SUPPORT=y
 CONFIG_AUDIO_ENCODER_AAC_SUPPORT=y
+
+# ----------------------------------------------------------------------------
+# Wi-Fi par le coprocesseur ESP32-C6 (ESP-Hosted, SDIO), comme le firmware
+# ----------------------------------------------------------------------------
+# Repris de firmware/sdkconfig.defaults (section « Wi-Fi d'installation »),
+# options vérifiées dans ESP-Hosted 3.x (CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW
+# du firmware n'existe plus et n'est pas reprise). Le C6 reste en reset
+# jusqu'au démarrage de la fonction « wifi » ; une panne du lien SDIO ne
+# redémarre pas la carte (vérifié à la compilation par nid_wifi).
+CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
+# CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN is not set
+# CONFIG_ESP_HOSTED_HOST_TRANSPORT_RESTART_ON_FAILURE is not set

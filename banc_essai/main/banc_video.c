@@ -58,6 +58,7 @@ void banc_crochet_image(const nid_capture_frame_t *f, void *arg)
         banc_etat_deverrouiller();
     }
     banc_ecran_image(f);
+    banc_web_image(f);      /* vue de la page web : cadence réduite, image sautée si occupé */
 }
 
 /* ------------------------------------------------------------------------- */

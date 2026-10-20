@@ -11,17 +11,23 @@
  *  - banc_ui.c        : onglets de l'écran, panneau d'état, boutons tactiles ;
  *  - banc_ecran.c     : écran MIPI-DSI (dessin direct RGB565, vue caméra par le PPA) ;
  *  - banc_tactile.c   : dalle tactile GT911 ;
- *  - banc_console.c   : commandes de la console série.
+ *  - banc_console.c   : commandes de la console série (et de la console web) ;
+ *  - banc_wifi.c      : Wi-Fi par le coprocesseur ESP32-C6 (composant nid_wifi) ;
+ *  - banc_web.c       : tableau de bord web (état, actions, fichiers, console) ;
+ *  - banc_web_vue.c   : vue caméra MJPEG de la page web.
  */
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+#include "sdkconfig.h"
 #include "esp_err.h"
 #include "nid_capture.h"
 #include "nid_config.h"
 #include "nid_storage.h"
+#include "nid_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -150,6 +156,7 @@ typedef enum {
     BANC_F_TEMPERATURE,
     BANC_F_SUIVI,
     BANC_F_CONSOLE,
+    BANC_F_WIFI,                /*!< Wi-Fi (coprocesseur ESP32-C6) et tableau de bord web */
     BANC_NB_F,
 } banc_fonction_t;
 
@@ -226,6 +233,7 @@ typedef enum {
     BANC_ONGLET_NUIT,
     BANC_ONGLET_SON,
     BANC_ONGLET_SYSTEME,
+    BANC_ONGLET_WIFI,
     BANC_NB_ONGLETS,
 } banc_onglet_t;
 
@@ -387,6 +395,19 @@ void banc_rafraichir_entete(void);
 /** Heure locale au format strftime. */
 void banc_heure_locale(char *out, size_t len, const char *fmt);
 
+/**
+ * Règle l'heure (console « heure », page web) : journal, en-tête, mode nuit
+ * automatique. ESP_ERR_INVALID_ARG hors 2024-2099.
+ */
+esp_err_t banc_regler_heure(time_t t, const char *origine);
+
+/** Copie de la dernière ligne écrite dans le bandeau (même sans écran : page web). */
+void banc_bandeau_noter(banc_ligne_t ligne, banc_couleur_t couleur, const char *texte);
+void banc_bandeau_lire(banc_ligne_t ligne, char *out, size_t len, banc_couleur_t *couleur);
+
+/** true si le vumètre doit être mesuré (onglet SON de l'écran ou section Son de la page web). */
+bool banc_vumetre_demande(void);
+
 /* ========================================================================= */
 /* Vidéo et photo (banc_video.c), appelées par la tâche d'action              */
 /* ========================================================================= */
@@ -530,6 +551,89 @@ const char *banc_ui_nom_onglet(banc_onglet_t onglet);
 
 /** Enregistre les commandes et démarre la console interactive (REPL). */
 esp_err_t banc_console_demarrer(void);
+
+/**
+ * Exécute une ligne de commande (même table que la console série, sans
+ * l'état global d'esp_console : utilisable depuis une autre tâche, console
+ * série désactivée ou non). La sortie va sur stdout.
+ * @return ESP_ERR_NOT_FOUND : commande inconnue ; ESP_ERR_INVALID_ARG : ligne
+ *         vide ou trop longue ; ESP_OK sinon (*code : code de retour).
+ */
+esp_err_t banc_console_executer(const char *ligne, int *code);
+
+/** Copie de la ligne pour le journal, mot de passe masqué (« wifi sta <ssid> **** »). */
+void banc_console_masquer(const char *ligne, char *out, size_t len);
+
+/* ========================================================================= */
+/* Wi-Fi (banc_wifi.c) et tableau de bord web (banc_web.c, banc_web_vue.c)    */
+/* ========================================================================= */
+
+/** État du Wi-Fi du banc (écran, console, page web). */
+typedef struct {
+    bool              demarre;          /*!< tâche Wi-Fi lancée (fonction choisie) */
+    bool              voulu;            /*!< marche demandée (« wifi on|off ») */
+    nid_wifi_status_t st;               /*!< état de nid_wifi */
+    bool              repli_ap;         /*!< station introuvable : repli sur le point d'accès */
+    char              version_c6[NID_WIFI_VERSION_LEN];
+    char              version_hote[NID_WIFI_VERSION_LEN];
+    char              compat[72];       /*!< compatibilité du firmware du C6 */
+    bool              compat_ok;
+    bool              rssi_ok;
+    int               rssi;             /*!< station : dBm */
+    bool              web;              /*!< serveur web démarré */
+    bool              vue_client;       /*!< vue caméra ouverte sur la page */
+    uint32_t          requetes;         /*!< requêtes HTTP reçues */
+} banc_wifi_etat_t;
+
+#if CONFIG_BANC_F_WIFI
+
+/** Lance la tâche Wi-Fi (non bloquant) : C6, point d'accès ou station, puis serveur web. */
+esp_err_t banc_wifi_demarrer(void);
+
+void banc_wifi_etat(banc_wifi_etat_t *out);
+
+/** Commande « wifi » de la console (série et web). */
+int banc_wifi_commande(int argc, char **argv);
+
+/** Serveur web (idempotent), appelé par la tâche Wi-Fi quand le réseau est prêt. */
+esp_err_t banc_web_demarrer(void);
+
+/** Compteur de requêtes et vue ouverte (état Wi-Fi). */
+uint32_t banc_web_requetes(void);
+
+/** true si la section Son de la page est affichée (vumètre à mesurer). */
+bool banc_web_son_demande(void);
+
+/** Vue caméra : true si un client regarde (le viseur doit tourner, même sans écran). */
+bool banc_web_vue_active(void);
+
+/** Crochet d'image : réduction (PPA) puis JPEG pour la vue web, cadence limitée, jamais d'attente. */
+void banc_web_image(const nid_capture_frame_t *f);
+
+#else
+
+static inline esp_err_t banc_wifi_demarrer(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+static inline void banc_wifi_etat(banc_wifi_etat_t *out)
+{
+    *out = (banc_wifi_etat_t) { 0 };
+}
+static inline bool banc_web_son_demande(void)
+{
+    return false;
+}
+static inline bool banc_web_vue_active(void)
+{
+    return false;
+}
+static inline void banc_web_image(const nid_capture_frame_t *f)
+{
+    (void)f;
+}
+
+#endif
 
 #ifdef __cplusplus
 }

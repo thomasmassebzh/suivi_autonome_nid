@@ -96,6 +96,16 @@ static const char *TAG = "banc_fonctions";
 #else
 #define C_CONSOLE 0
 #endif
+#ifdef CONFIG_BANC_F_WIFI
+#define C_WIFI 1
+#else
+#define C_WIFI 0
+#endif
+
+/* Sélection mémorisée : fonctions connues du banc qui l'a enregistrée. Une
+ * fonction ajoutée depuis (absente de ce masque) est cochée par défaut. */
+#define NVS_CLE_CONNUES     "f_connues"
+#define CONNUES_V1          0x7FFu      /* écran → console : banc antérieur à la fonction Wi-Fi */
 
 #define FBIT(f)              (1u << (f))
 
@@ -118,6 +128,7 @@ static const fonction_t s_f[BANC_NB_F] = {
     [BANC_F_TEMPERATURE] = { "temperature", "Température de la puce", C_TEMPERATURE, 0 },
     [BANC_F_SUIVI]       = { "suivi", "Photo de suivi", C_SUIVI, FBIT(BANC_F_CAMERA) | FBIT(BANC_F_SD) },
     [BANC_F_CONSOLE]     = { "console", "Console série", C_CONSOLE, 0 },
+    [BANC_F_WIFI]        = { "wifi", "Wi-Fi (C6) et page web", C_WIFI, 0 },
 };
 
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -154,7 +165,9 @@ void banc_fonctions_charger(void)
     if (err == ESP_OK && nvs_open(NVS_ESPACE, NVS_READONLY, &h) == ESP_OK) {
         uint32_t lu = 0;
         if (nvs_get_u32(h, NVS_CLE, &lu) == ESP_OK) {
-            m = lu;
+            uint32_t connues = CONNUES_V1;
+            nvs_get_u32(h, NVS_CLE_CONNUES, &connues);    /* absente : sélection d'un banc plus ancien */
+            m = (lu & connues) | (m & ~connues);            /* nouvelles fonctions : cochées */
         }
         nvs_close(h);
     } else if (err != ESP_OK) {
@@ -174,9 +187,11 @@ static void enregistrer(void)
     if (nvs_open(NVS_ESPACE, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
-    uint32_t avant = 0;
-    if (nvs_get_u32(h, NVS_CLE, &avant) != ESP_OK || avant != m) {
-        if (nvs_set_u32(h, NVS_CLE, m) == ESP_OK) {
+    const uint32_t connues = (1u << BANC_NB_F) - 1u;
+    uint32_t avant = 0, connues_avant = 0;
+    if (nvs_get_u32(h, NVS_CLE, &avant) != ESP_OK || avant != m ||
+        nvs_get_u32(h, NVS_CLE_CONNUES, &connues_avant) != ESP_OK || connues_avant != connues) {
+        if (nvs_set_u32(h, NVS_CLE, m) == ESP_OK && nvs_set_u32(h, NVS_CLE_CONNUES, connues) == ESP_OK) {
             nvs_commit(h);
         }
     }

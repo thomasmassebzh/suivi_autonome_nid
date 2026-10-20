@@ -58,6 +58,17 @@ menu "Banc d'essai"
             bool "Console série (commandes)"
             default y
 
+        config BANC_F_WIFI
+            bool "Wi-Fi (coprocesseur ESP32-C6) et tableau de bord web"
+            default y
+            help
+                Point d'accès « BANC-NID » (ou station sur un réseau existant) et
+                page web servie par le banc : état en direct, vue caméra, boutons,
+                fichiers de la carte SD, console. Permet d'utiliser le banc sans
+                écran. Réglages : menu « Wi-Fi et tableau de bord web » ci-dessous.
+                Le composant nid_wifi reste compilé (dépendance fixe), mais sans
+                cette option aucun code Wi-Fi n'est appelé ni lié.
+
         config BANC_SELECTION_S
             int "Écran de sélection au démarrage : démarrage automatique après (s ; 0 = pas d'écran)"
             range 0 60
@@ -68,6 +79,100 @@ menu "Banc d'essai"
                 basculer / valider ; console : « fonctions »). Sans action, le banc
                 démarre au bout de ce délai avec la dernière sélection (mémorisée
                 en NVS).
+    endmenu
+
+    menu "Wi-Fi et tableau de bord web"
+        depends on BANC_F_WIFI
+
+        choice BANC_WIFI_MODE
+            prompt "Mode Wi-Fi au démarrage"
+            default BANC_WIFI_MODE_AP
+            help
+                Point d'accès : le PC ou le téléphone se connecte au réseau du banc
+                puis ouvre http://192.168.4.1. Station : le banc rejoint un réseau
+                existant (adresse donnée par sa box ou son routeur, affichée par la
+                commande « wifi » et l'onglet WI-FI). La console « wifi ap » /
+                « wifi sta <ssid> <mdp> » change de mode et le mémorise en NVS.
+
+            config BANC_WIFI_MODE_AP
+                bool "Point d'accès (192.168.4.1)"
+            config BANC_WIFI_MODE_STA
+                bool "Station (rejoindre un réseau existant)"
+        endchoice
+
+        config BANC_WIFI_AP_SSID
+            string "Nom du point d'accès (SSID)"
+            default "BANC-NID"
+
+        config BANC_WIFI_AP_MDP
+            string "Mot de passe du point d'accès (WPA2, 8 à 63 caractères)"
+            default "banc-nid-essai"
+            help
+                À changer pour chaque banc utilisé hors du laboratoire. Il n'est
+                jamais affiché ni renvoyé par la page web. Invalide (moins de 8
+                caractères) : le Wi-Fi ne démarre pas et la fonction est « en défaut ».
+
+        config BANC_WIFI_AP_CANAL
+            int "Canal du point d'accès"
+            range 1 13
+            default 6
+
+        config BANC_WIFI_AP_CLIENTS
+            int "Nombre maximal d'appareils connectés au point d'accès"
+            range 1 4
+            default 3
+
+        config BANC_WIFI_STA_SSID
+            string "Station : réseau à rejoindre (SSID)"
+            default ""
+            help
+                Vide : réglage par la console (« wifi sta <ssid> <mdp> »), mémorisé.
+
+        config BANC_WIFI_STA_MDP
+            string "Station : mot de passe du réseau (vide : réseau ouvert)"
+            default ""
+
+        config BANC_WIFI_STA_DELAI_S
+            int "Station : attente de la connexion (s)"
+            range 5 120
+            default 20
+
+        config BANC_WIFI_STA_REPLI
+            bool "Station introuvable : repli sur le point d'accès"
+            default y
+            help
+                Si le réseau n'est pas rejoint dans le délai, le banc ouvre son point
+                d'accès (il reste joignable sans écran). Sinon, il réessaie sans fin.
+
+        config BANC_WEB_VUE_LARGEUR
+            int "Vue caméra de la page : largeur maximale (pixels)"
+            range 320 960
+            default 640
+
+        config BANC_WEB_VUE_QUALITE
+            int "Vue caméra de la page : qualité JPEG"
+            range 20 90
+            default 50
+
+        config BANC_WEB_VUE_IPS
+            int "Vue caméra de la page : images par seconde (hors enregistrement)"
+            range 1 12
+            default 8
+
+        config BANC_WEB_VUE_ENREG_IPS
+            int "Vue caméra de la page : images par seconde pendant un enregistrement (0 = aucune)"
+            range 0 5
+            default 2
+            help
+                Comme la vue de l'écran : quelques images par seconde seulement, les
+                autres sont sautées sans attendre, pour ne pas faire perdre d'images
+                à la vidéo. Comparer « perdues » dans le bilan avec 0.
+
+        config BANC_WEB_SUPPRESSION
+            bool "Page web : suppression des fichiers de la carte SD"
+            default y
+            help
+                Bouton « supprimer » (avec confirmation) dans la liste des fichiers.
     endmenu
 
     comment "Bouton BOOT, vidéo manuelle (appui long ou commande « video »)"

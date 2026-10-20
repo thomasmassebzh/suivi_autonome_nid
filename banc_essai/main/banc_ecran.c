@@ -730,7 +730,7 @@ void banc_ecran_disque(uint16_t cx, uint16_t cy, uint16_t rayon, banc_couleur_t 
 
 void banc_ecran_ligne(banc_ligne_t ligne, banc_couleur_t couleur, const char *fmt, ...)
 {
-    if (!s_ec.ok || ligne >= BANC_NB_LIGNES || couleur >= BANC_NB_COULEURS) {
+    if (ligne >= BANC_NB_LIGNES || couleur >= BANC_NB_COULEURS) {
         return;
     }
     char texte[TEXTE_MAX];
@@ -738,6 +738,10 @@ void banc_ecran_ligne(banc_ligne_t ligne, banc_couleur_t couleur, const char *fm
     va_start(ap, fmt);
     vsnprintf(texte, sizeof(texte), fmt, ap);
     va_end(ap);
+    banc_bandeau_noter(ligne, couleur, texte);     /* copie pour la page web, écran ou non */
+    if (!s_ec.ok) {
+        return;
+    }
 
     const banc_rect_t *b = &s_ec.zones.bandeau;
     const uint32_t y = b->y + SEPARATION_H + 4u + (uint32_t)ligne * LIGNE_H;
@@ -795,9 +799,15 @@ void banc_ecran_image(const nid_capture_frame_t *f)
 
 void banc_ecran_ligne(banc_ligne_t ligne, banc_couleur_t couleur, const char *fmt, ...)
 {
-    (void)ligne;
-    (void)couleur;
-    (void)fmt;
+    if (ligne >= BANC_NB_LIGNES || couleur >= BANC_NB_COULEURS) {
+        return;
+    }
+    char texte[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(texte, sizeof(texte), fmt, ap);
+    va_end(ap);
+    banc_bandeau_noter(ligne, couleur, texte);     /* copie pour la page web */
 }
 
 void banc_ecran_message_vue(banc_couleur_t couleur, const char *texte)
