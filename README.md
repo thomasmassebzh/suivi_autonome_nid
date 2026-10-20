@@ -26,6 +26,7 @@ versions figées des composants). Modules :
 | `nid_config` | fait : lecture et écriture de `config.ini` |
 | `nid_ir` | fait : LED 940 nm, filtre IR-cut, lever/coucher du soleil, avec tests sur PC (`make -C firmware/components/nid_ir/test_host`) |
 | `nid_install` | fait : Wi-Fi via le C6, page web (aperçu, réglages, heure, maintenance) — à valider sur la carte |
+| `nid_wifi` | fait : démarrage du C6 (ESP-Hosted), point d'accès ou station, arrêt propre ; commun à `nid_install` et au banc d'essai — à valider sur la carte |
 | `nid_capture` | fait, d'après les exemples Espressif (`esp_video` sd_card, `esp_muxer` video_muxer) : OV5647 / SC2336 détectées, date/heure incrustée, H.264 matériel + son AAC (ES8311) en MP4, photo et aperçu JPEG, mode nuit monochrome — **à valider sur la carte** (recadrages ISP, lecture des MP4, synchro son/image) |
 | `nid_storage` | fait : montage de la carte SD (LDO interne), nommage, écriture sécurisée `.tmp` → nom final, récupération `_INCOMPLET`, journal CSV |
 | `nid_clock` | **à faire** : pilote DS3231/DS1307 (interface définie, fonctions provisoires) |
@@ -324,7 +325,8 @@ une interface documentée (`include/*.h`). La logique d'ensemble est dans `firmw
 | `nid_storage` | carte microSD, nommage, écriture sécurisée, journal | FP1.6, FP1.7 |
 | `nid_config` | lecture/écriture de `config.ini` | FS1.4 |
 | `nid_power` | causes de réveil, veille profonde, batterie, chien de garde | FC3.1 à FC3.4 |
-| `nid_install` | Wi-Fi via le C6, page web d'installation, aperçu MJPEG, réglages, maintenance | FS1.2 à FS1.4, FS2, FC1.6 |
+| `nid_install` | page web d'installation, aperçu MJPEG, réglages, maintenance | FS1.2 à FS1.4, FS2, FC1.6 |
+| `nid_wifi` | Wi-Fi via le coprocesseur C6 (ESP-Hosted) : point d'accès, station, arrêt (C6 en reset) | FS1.2, FC3.2 |
 
 Chemin critique d'un réveil par le PIR (objectif ≤ 1 s jusqu'à la première image, FP1.4) :
 les réglages sont conservés en mémoire RTC (aucune lecture de la carte SD avant de démarrer la

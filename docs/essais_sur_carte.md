@@ -181,8 +181,8 @@ mode **music** : lecture d'un extrait. Le système de terrain n'utilise que le m
 
 ## Étape 9 — `wifi/getting_started/station`
 
-Valide : Wi-Fi par le coprocesseur ESP32-C6 (ESP-Hosted, utilisé uniquement pour la page web
-d'installation). Renseigner SSID et mot de passe dans `SDK Configuration Editor`. Résultat attendu :
+Valide : Wi-Fi par le coprocesseur ESP32-C6 (ESP-Hosted, utilisé pour la page web d'installation
+du firmware et pour la page du banc d'essai sans écran, composant commun `nid_wifi`). Renseigner SSID et mot de passe dans `SDK Configuration Editor`. Résultat attendu :
 `got ip:...`. Relever dans le journal la **version du firmware du C6** : notre firmware utilise
 ESP-Hosted 3.x, un firmware du C6 trop ancien devra être mis à jour (connecteur de programmation du
 C6 sur la carte, avec un ESP-Prog ou un adaptateur USB-série).
