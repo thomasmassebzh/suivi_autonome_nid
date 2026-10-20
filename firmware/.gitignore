@@ -8,3 +8,7 @@ sdkconfig.old
 .vscode/
 .devcontainer/
 *.code-workspace
+
+# Exécutables des tests sur PC (make dans components/*/test_host)
+components/*/test_host/test_nid_*
+!components/*/test_host/*.c

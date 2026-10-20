@@ -421,7 +421,7 @@ static esp_err_t status_get(httpd_req_t *req)
     sb_printf(&b, ",\"pir\":%s,\"nuit\":%s,\"mode_nuit\":\"%s\",\"ir\":%s,\"puissance_ir\":%u",
               json_bool(sh.pir), json_bool(sh.night), nid_config_night_mode_str(mode), json_bool(sh.ir_on),
               (unsigned)ir_pct);
-    sb_printf(&b, ",\"clients\":%d,\"ssid\":", sh.clients);
+    sb_printf(&b, ",\"clients\":%d,\"ssid\":", inst_wifi_clients());
     sb_json_str(&b, sh.ssid);
     sb_printf(&b, ",\"ident\":");
     sb_json_str(&b, ident);

@@ -63,7 +63,6 @@ typedef struct {
     bool          ir_on;
     char          last_photo[NID_PATH_MAX];
     /* Wi-Fi */
-    int           clients;
     char          ssid[NID_CONFIG_SSID_LEN];
     char          cp_version[INST_CP_LEN];
 } inst_shared_t;
@@ -72,7 +71,7 @@ inst_shared_t *inst_shared(void);
 void inst_lock(void);
 void inst_unlock(void);
 
-/* ---- nid_install_wifi.c : coprocesseur ESP32-C6 et point d'accès ---- */
+/* ---- nid_install_wifi.c : point d'accès (composant commun nid_wifi) ---- */
 
 /**
  * Démarre le coprocesseur, le transport ESP-Hosted et le point d'accès
@@ -89,6 +88,9 @@ void inst_wifi_stop(void);
 
 /** true si la liaison avec le coprocesseur a été perdue en cours de route. */
 bool inst_wifi_link_lost(void);
+
+/** Téléphones associés au point d'accès. */
+int inst_wifi_clients(void);
 
 /** Cause du dernier échec de inst_wifi_start() (texte français). */
 const char *inst_wifi_error(void);

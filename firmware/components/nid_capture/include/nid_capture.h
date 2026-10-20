@@ -142,6 +142,27 @@ typedef void (*nid_capture_frame_hook_t)(const nid_capture_frame_t *frame, void 
  */
 void nid_capture_set_frame_hook(nid_capture_frame_hook_t hook, void *arg);
 
+/** Niveau du micro : valeurs absolues des échantillons 16 bits (0..32767). */
+typedef struct {
+    uint16_t peak;             /*!< crête */
+    uint16_t rms;              /*!< valeur efficace */
+} nid_capture_audio_level_t;
+
+/**
+ * Vumètre (banc d'essai ; le firmware de terrain ne l'utilise pas) : mesure le
+ * niveau du micro pendant duration_ms (bloquant, micro ouvert puis refermé).
+ * Hors enregistrement seulement : pendant un enregistrement, utiliser
+ * nid_capture_audio_last_level(). ESP_ERR_NOT_SUPPORTED : son non initialisé
+ * (réglage audio désactivé ou ES8311 absent).
+ */
+esp_err_t nid_capture_audio_level(uint32_t duration_ms, nid_capture_audio_level_t *out);
+
+/**
+ * Niveau du dernier bloc de 64 ms lu par la piste son (enregistrement en cours
+ * ou mesure du vumètre). @return false si aucun bloc depuis 1 s.
+ */
+bool nid_capture_audio_last_level(nid_capture_audio_level_t *out);
+
 /** Arrête la caméra (capteur en veille si possible) et libère la mémoire. */
 esp_err_t nid_capture_deinit(void);
 

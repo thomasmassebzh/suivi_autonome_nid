@@ -1,12 +1,4 @@
-## Wi-Fi de l'ESP32-P4 via le coprocesseur ESP32-C6 (liaison SDIO, ESP-Hosted).
-## Après la première compilation réussie, versionner firmware/dependencies.lock.
+## Wi-Fi de l'ESP32-P4 via le coprocesseur ESP32-C6 : dépendances ESP-Hosted
+## déclarées par le composant commun nid_wifi (voir son idf_component.yml).
 dependencies:
   idf: ">=6.1"
-  espressif/esp_wifi_remote:
-    version: "^1.6.5"
-    rules:
-      - if: "target in [esp32p4]"
-  espressif/esp_hosted:
-    version: "^3.0.9"
-    rules:
-      - if: "target in [esp32p4]"

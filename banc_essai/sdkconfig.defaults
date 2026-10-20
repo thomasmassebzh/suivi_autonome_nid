@@ -1,8 +1,8 @@
 # Valeurs par défaut du banc d'essai — ESP32-P4X-Function-EV-Board
 #
 # Reprend de firmware/sdkconfig.defaults les sections puce, flash, PSRAM,
-# carte SD, caméra et audio (le banc teste le même chemin que le firmware de
-# terrain), sans la veille profonde ni le Wi-Fi. Fichier lu à la création de
+# carte SD, caméra, audio et Wi-Fi (le banc teste le même chemin que le
+# firmware de terrain), sans la veille profonde. Fichier lu à la création de
 # `sdkconfig` (première compilation, ou après « ESP-IDF: Full Clean »).
 # Réglages propres au banc : menu « Banc d'essai » (SDK Configuration Editor).
 
@@ -53,6 +53,10 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_API_ENCODING_UTF_8=y
 CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+# Points de montage VFS : la carte SD, la console, et un par périphérique
+# d'esp_video (caméra, ISP, encodeurs H.264 et JPEG : /dev/video0, 10, 11...).
+# Avec 8 (défaut), « Failed to register video VFS dev name=video10 ».
+CONFIG_VFS_MAX_COUNT=16
 
 # ----------------------------------------------------------------------------
 # Caméra et vidéo (esp_video / esp_cam_sensor), identique au firmware
@@ -83,3 +87,15 @@ CONFIG_ESP_MUXER_MP4_SUPPORT=y
 # ----------------------------------------------------------------------------
 CONFIG_CODEC_ES8311_SUPPORT=y
 CONFIG_AUDIO_ENCODER_AAC_SUPPORT=y
+
+# ----------------------------------------------------------------------------
+# Wi-Fi par le coprocesseur ESP32-C6 (ESP-Hosted, SDIO), comme le firmware
+# ----------------------------------------------------------------------------
+# Repris de firmware/sdkconfig.defaults (section « Wi-Fi d'installation »),
+# options vérifiées dans ESP-Hosted 3.x (CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW
+# du firmware n'existe plus et n'est pas reprise). Le C6 reste en reset
+# jusqu'au démarrage de la fonction « wifi » ; une panne du lien SDIO ne
+# redémarre pas la carte (vérifié à la compilation par nid_wifi).
+CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
+# CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN is not set
+# CONFIG_ESP_HOSTED_HOST_TRANSPORT_RESTART_ON_FAILURE is not set

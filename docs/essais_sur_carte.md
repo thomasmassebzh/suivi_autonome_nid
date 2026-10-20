@@ -48,6 +48,8 @@ Guide officiel : *ESP32-P4X-Function-EV-Board User Guide* (esp-dev-kits). Points
    (par ex. `get-started/hello_world`) › choisir un dossier **hors du dépôt** (par ex. `~/essais_esp/`).
 2. Ouvrir ce dossier, puis comme pour le firmware : `ESP-IDF: Set Espressif Device Target` ›
    **esp32p4**, `ESP-IDF: SDK Configuration Editor` si un réglage est indiqué ci-dessous,
+   `ESP-IDF: Select Flash Method` › **UART** (pas JTAG : la méthode JTAG passe par OpenOCD et un pilote
+   WinUSB, et échoue avec `esp_usb_jtag: could not find or open device`), port COMx de la carte,
    `ESP-IDF: Build, Flash and Start a Monitor on Your Device` (voir les étapes 3 à 6 du
    [README](../README.md)).
 
@@ -68,13 +70,19 @@ puce rév. v3.1 : ne pas cocher `ESP32P4_SELECTS_REV_LESS_V3`.
 ## Étape 1 — `get-started/hello_world`
 
 Valide : environnement, câble, port, flash, moniteur. Résultat attendu dans le moniteur :
-`This is esp32p4 chip with 2 CPU core(s)`, **`silicon revision v3.1`** (ou 3.x),
-**`16MB external flash`**. Si le flash échoue : maintenir **BOOT**, appuyer sur **RESET**, relâcher
-BOOT, puis relancer le flash.
+`This is esp32p4 chip with 2 CPU core(s)`, **`silicon revision v3.1`** (ou 3.x), `2MB external flash`
+précédé de l'avertissement **`Detected size(16384k) larger than the size in the binary image header(2048k)`** :
+les 16 Mo sont bien détectés, l'exemple étant compilé pour 2 Mo par défaut. Si le flash échoue :
+vérifier la méthode **UART** (pas JTAG), puis maintenir **BOOT**, appuyer sur **RESET**, relâcher
+BOOT, et relancer le flash.
 
 ## Étape 2 — `peripherals/i2c/i2c_tools`
 
 Valide : le bus I2C partagé (caméra, codec ES8311, écran tactile, plus tard l'horloge DS3231).
+**Réglage obligatoire** : `SDK Configuration Editor` › rechercher *Channel for console output*
+(menu *ESP-STDIO*) › **USB Serial/JTAG Controller**. La P4X n'a pas de convertisseur USB-série : par
+défaut la console attend les commandes sur l'UART0 (GPIO37/38) et ce qui est tapé dans le moniteur
+ne serait pas reçu.
 Dans le moniteur, au prompt `i2c-tools>` :
 
 ```text
@@ -98,7 +106,9 @@ puis écriture et relecture d'un fichier.
 
 ## Étape 4 — `peripherals/lcd/mipi_dsi`
 
-Valide : écran, nappe, fils RST/PWM. Écran **EK79007** (choix par défaut, 1024×600). Résultat
+Valide : écran, nappe, fils RST/PWM. L'exemple ne commande ni le rétroéclairage ni le reset : dans
+`main/mipi_dsi_lcd_example_main.c`, passer `EXAMPLE_PIN_NUM_BK_LIGHT` de `-1` à **`26`** et
+`EXAMPLE_PIN_NUM_LCD_RST` de `-1` à **`27`**. Écran **EK79007** (choix par défaut, 1024×600). Résultat
 attendu : un widget LVGL s'affiche. Écran noir : vérifier le fil GPIO26 → PWM (rétroéclairage) et
 l'alimentation 5 V de l'adaptateur ; écran allumé mais vide : fil GPIO27 → RST_LCD, sens de la nappe.
 
@@ -107,7 +117,9 @@ l'alimentation 5 V de l'adaptateur ; écran allumé mais vide : fil GPIO27 → R
 Valide : caméra → ISP → écran, sans la bibliothèque `esp_video`. Dans `SDK Configuration Editor`,
 activer le capteur : `CONFIG_CAMERA_SC2336` (caméra du kit) ou `CONFIG_CAMERA_OV5647`. Résultat
 attendu : image en direct à l'écran et, dans le moniteur, `Detected Camera sensor PID=...`.
-L'image n'est pas réglée (couleurs, netteté) : seul le fonctionnement compte ici.
+L'image n'est pas réglée (couleurs, netteté) : seul le fonctionnement compte ici. Cet exemple ne
+commande pas le rétroéclairage : si l'écran reste noir alors que l'étape 4 marchait, brancher pour
+l'essai le fil `PWM` de J6 sur une broche 3V3 de J1 au lieu de GPIO26, puis le remettre.
 
 ## Étape 6 — exemples `esp_video` (bibliothèque utilisée par notre module `nid_capture`)
 
@@ -141,6 +153,25 @@ l'arrête.
    (comme le firmware de terrain) renomme le fichier interrompu en `..._INCOMPLET` et l'indique à
    l'écran ; aucun fichier ne doit porter un nom final sans être lisible.
 
+## Étape 7 bis — tests du banc
+
+Le banc teste ensuite chaque fonction, écran allumé (onglets DÉTECTION, PHOTO, NUIT, SON, SYSTÈME,
+tactiles ou commande `ecran`). Détails, valeurs attendues et interprétation :
+[banc_essai/README.md](../banc_essai/README.md#tests-dans-lordre-conseillé). Ordre conseillé :
+
+1. **Démarrage** : écran de sélection des fonctions (5 s, ne garder que le matériel branché),
+   `i2cscan` (caméra, ES8311 0x18, GT911 0x5D/0x14), `info`, `heure AAAA-MM-JJ HH:MM:SS`.
+2. **Carte SD** (onglet SYSTÈME) : `sd` (volume ≈ capacité de la carte), `sd test` (débit, latence max).
+3. **Vidéo avec son** : appui long sur BOOT (ou `son video`) ; `trames_son` > 0, `perdues` = 0, piste
+   `aac` dans `ffprobe`.
+4. **Détection PIR** (onglet DÉTECTION, priorité) : pastille PIR en temps réel, chauffe puis ARMÉ,
+   séquence de 30 s sur un passage, délai de 60 s, fausses détections, latence front → 1re image.
+5. **Photo** puis **photo de suivi** : `suivi 1`, une photo par minute tant que la surveillance est armée.
+6. **Nuit** : `nuit on/off/auto`, `ir 50`, `ircut jour|nuit`, `mono on|off`, `soleil`.
+7. **Son** : vumètre de l'onglet SON (parler, taper près du micro).
+8. **Batterie et température** : `batterie` (« non câblée » sans pont diviseur), `temp`.
+9. **Endurance** : `boucle 20`, puis comparer la mémoire avant/après et les images perdues.
+
 ## Étape 8 — `peripherals/i2s/i2s_codec/i2s_es8311`
 
 Valide : codec audio, micro (et haut-parleur). Les broches par défaut pour l'ESP32-P4 sont celles
@@ -150,8 +181,8 @@ mode **music** : lecture d'un extrait. Le système de terrain n'utilise que le m
 
 ## Étape 9 — `wifi/getting_started/station`
 
-Valide : Wi-Fi par le coprocesseur ESP32-C6 (ESP-Hosted, utilisé uniquement pour la page web
-d'installation). Renseigner SSID et mot de passe dans `SDK Configuration Editor`. Résultat attendu :
+Valide : Wi-Fi par le coprocesseur ESP32-C6 (ESP-Hosted, utilisé pour la page web d'installation
+du firmware et pour la page du banc d'essai sans écran, composant commun `nid_wifi`). Renseigner SSID et mot de passe dans `SDK Configuration Editor`. Résultat attendu :
 `got ip:...`. Relever dans le journal la **version du firmware du C6** : notre firmware utilise
 ESP-Hosted 3.x, un firmware du C6 trop ancien devra être mis à jour (connecteur de programmation du
 C6 sur la carte, avec un ESP-Prog ou un adaptateur USB-série).

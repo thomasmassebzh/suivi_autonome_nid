@@ -78,14 +78,39 @@ typedef enum {
 esp_err_t nid_power_battery_init(void);
 
 /**
+ * Plage de tension vraisemblable (après compensation du pont diviseur). Hors de
+ * cette plage, la mesure est considérée comme absente : broche ADC en l'air
+ * (pont non câblé : ~2 V lus sur la carte de développement), pont mal câblé ou
+ * rapport mal réglé. Une mesure absente ne provoque jamais d'arrêt (FC3.4 n'est
+ * alors plus assuré par le logiciel, comme sans broche de mesure).
+ */
+#define NID_BATT_PLAUSIBLE_MIN_MV   2500
+#define NID_BATT_PLAUSIBLE_MAX_MV   20000
+
+/**
  * Tension batterie en mV : moyenne tronquée de CONFIG_NID_BATT_SAMPLES
  * échantillons (< 1 ms), pont diviseur compensé. Utilisable depuis plusieurs
  * tâches à la fois (verrou interne). *mv = 0 en cas d'erreur ;
- * ESP_ERR_INVALID_STATE si nid_power_battery_init() n'a pas réussi.
+ * ESP_ERR_INVALID_STATE si nid_power_battery_init() n'a pas réussi ;
+ * ESP_ERR_INVALID_RESPONSE si la tension est invraisemblable (voir
+ * NID_BATT_PLAUSIBLE_MIN_MV : mesure absente, signalée une fois dans le journal série).
  */
 esp_err_t nid_power_battery_read_mv(uint32_t *mv);
 
-/** Classe une tension par rapport aux seuils (mv = 0 → NID_BATT_UNKNOWN). */
+/** true si la tension (mV, après pont) est dans la plage vraisemblable. */
+bool nid_power_battery_plausible(uint32_t mv);
+
+/**
+ * Dernière tension calculée par nid_power_battery_read_mv(), même
+ * invraisemblable (banc d'essai : afficher ce que lit une broche non câblée).
+ * 0 si aucune mesure.
+ */
+uint32_t nid_power_battery_last_raw_mv(void);
+
+/**
+ * Classe une tension par rapport aux seuils. 0 (pas de mesure) ou tension
+ * invraisemblable → NID_BATT_UNKNOWN (jamais CRITICAL).
+ */
 nid_batt_level_t nid_power_battery_level(uint32_t mv, uint32_t low_mv, uint32_t critical_mv);
 
 /* ---------- Chien de garde (FC3.3) ---------- */

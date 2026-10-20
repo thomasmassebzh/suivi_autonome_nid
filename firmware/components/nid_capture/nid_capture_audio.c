@@ -7,12 +7,16 @@
  *    codec ES8311 (es8311_codec_new) et périphérique d'entrée esp_codec_dev ;
  *  - esp_muxer, test_apps/muxer_test/main/muxer_test.c
  *    (LicenseRef-Espressif-Modified-MIT, voir LICENSE_ESPRESSIF_EXAMPLES) :
- *    ouverture de l'encodeur AAC (esp_audio_enc), taille des trames,
- *    AudioSpecificConfig (codec_spec_info) et horodatage des trames ;
+ *    ouverture de l'encodeur AAC (esp_audio_enc), taille des trames et
+ *    horodatage des trames ;
  *  - esp_muxer, examples/video_muxer (Apache-2.0) : gain d'entrée du micro.
  * Modifications : réception seule, ampli du haut-parleur jamais piloté
- * (pa_pin = -1, FC1.2), lecture dans une tâche dédiée pendant la séquence.
+ * (pa_pin = -1, FC1.2), lecture dans une tâche dédiée pendant la séquence,
+ * AudioSpecificConfig calculée (nid_capture_calc.h) au lieu d'être lue dans
+ * l'encodeur (esp_audio_codec 2.6.2 ne la fournit pas en AAC brut), en-tête
+ * ADTS retiré s'il est présent, niveau du micro mémorisé pour le vumètre du banc.
  */
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +35,7 @@
 #include "esp_aac_enc.h"
 
 #include "nid_board.h"
+#include "nid_capture_calc.h"
 #include "nid_capture_priv.h"
 
 static const char *TAG = "nid_capture_son";
@@ -45,6 +50,7 @@ static const char *TAG = "nid_capture_son";
 #define AUDIO_STOP_TIMEOUT_MS   1000
 #define I2S_DMA_DESC_NUM        8           /* 8 x 512 trames = 256 ms de marge pendant les écritures SD */
 #define I2S_DMA_FRAME_NUM       512
+#define MEASURE_BLOCK_SAMPLES   1024        /* vumètre : blocs de 64 ms */
 
 static struct {
     bool                          inited;
@@ -71,7 +77,16 @@ static struct {
     uint32_t                      frames;
     nid_capture_audio_sink_t      sink;
     void                         *ctx;
-} s_au;
+    uint8_t                       asc[NID_AAC_ASC_LEN];  /*!< AudioSpecificConfig déclarée au MP4 */
+    bool                          adts_warned;
+
+    /* niveau du dernier bloc lu (vumètre du banc d'essai) */
+    portMUX_TYPE                  level_mux;
+    nid_capture_audio_level_t     level;
+    int64_t                       level_us;
+} s_au = {
+    .level_mux = portMUX_INITIALIZER_UNLOCKED,
+};
 
 static void free_codec(void)
 {
@@ -198,6 +213,98 @@ bool nid_capture_audio_ready(void)
     return s_au.inited;
 }
 
+/** Crête et valeur efficace d'un bloc PCM 16 bits. */
+static void block_level(const uint8_t *pcm, int bytes, uint32_t *peak, uint64_t *sum_sq, uint32_t *count)
+{
+    const int16_t *v = (const int16_t *)pcm;
+    const int n = bytes / (int)sizeof(int16_t);
+    for (int i = 0; i < n; i++) {
+        const int32_t x = v[i];
+        const uint32_t a = (uint32_t)(x < 0 ? -x : x);
+        if (a > *peak) {
+            *peak = a;
+        }
+        *sum_sq += (uint64_t)((int64_t)x * x);
+    }
+    *count += (uint32_t)n;
+}
+
+static uint16_t isqrt_u64(uint64_t v)
+{
+    uint64_t r = 0;
+    uint64_t bit = 1ULL << 62;
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint16_t)(r > 32767 ? 32767 : r);
+}
+
+static nid_capture_audio_level_t make_level(uint32_t peak, uint64_t sum_sq, uint32_t count)
+{
+    nid_capture_audio_level_t l = {
+        .peak = (uint16_t)(peak > 32767 ? 32767 : peak),
+        .rms = count ? isqrt_u64(sum_sq / count) : 0,
+    };
+    return l;
+}
+
+/** Mémorise le niveau du dernier bloc (vumètre du banc ; quelques µs par bloc de 64 ms). */
+static void store_level(const uint8_t *pcm, int bytes)
+{
+    uint32_t peak = 0;
+    uint64_t sum_sq = 0;
+    uint32_t count = 0;
+    block_level(pcm, bytes, &peak, &sum_sq, &count);
+    const nid_capture_audio_level_t l = make_level(peak, sum_sq, count);
+    const int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_au.level_mux);
+    s_au.level = l;
+    s_au.level_us = now;
+    portEXIT_CRITICAL(&s_au.level_mux);
+}
+
+bool nid_capture_audio_get_last_level(nid_capture_audio_level_t *out)
+{
+    portENTER_CRITICAL(&s_au.level_mux);
+    const nid_capture_audio_level_t l = s_au.level;
+    const int64_t t = s_au.level_us;
+    portEXIT_CRITICAL(&s_au.level_mux);
+    if (out != NULL) {
+        *out = l;
+    }
+    return t != 0 && esp_timer_get_time() - t < 1000000LL;
+}
+
+/**
+ * Remet une trame AAC au multiplexeur : trame brute attendue par le MP4. Si
+ * l'encodeur ajoute malgré tout un en-tête ADTS, il est retiré (signalé une fois).
+ */
+static void deliver_frame(const uint8_t *data, uint32_t len, uint32_t pts_ms)
+{
+    const size_t adts = nid_aac_adts_header_len(data, len);
+    if (adts > 0) {
+        if (!s_au.adts_warned) {
+            s_au.adts_warned = true;
+            ESP_LOGW(TAG, "trames AAC avec en-tête ADTS : en-têtes retirés pour le MP4");
+        }
+        data += adts;
+        len -= (uint32_t)adts;
+    }
+    if (len > 0) {
+        s_au.sink(data, len, pts_ms, s_au.ctx);
+        s_au.frames++;
+    }
+}
+
 static void audio_task(void *arg)
 {
     (void)arg;
@@ -216,6 +323,7 @@ static void audio_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        store_level(s_au.pcm, s_au.pcm_size);
         if (!atomic_load(&s_au.deliver)) {
             continue;   /* avant la première image vidéo : micro en route, trames ignorées */
         }
@@ -239,8 +347,7 @@ static void audio_task(void *arg)
             have_base = true;
         }
         if (out_frame.encoded_bytes > 0) {
-            s_au.sink(out_frame.buffer, out_frame.encoded_bytes, (uint32_t)(base_ms + (int64_t)out_frame.pts), s_au.ctx);
-            s_au.frames++;
+            deliver_frame(out_frame.buffer, out_frame.encoded_bytes, (uint32_t)(base_ms + (int64_t)out_frame.pts));
         }
     }
     xSemaphoreGive(s_au.done);
@@ -269,7 +376,9 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
     ESP_RETURN_ON_FALSE(sink != NULL && info != NULL, ESP_ERR_INVALID_ARG, TAG, "paramètres absents");
     ESP_RETURN_ON_FALSE(s_au.task == NULL, ESP_ERR_INVALID_STATE, TAG, "séquence audio déjà en cours");
 
-    /* Encodeur AAC brut (sans ADTS) : AudioSpecificConfig pour le MP4 (motif de muxer_test). */
+    /* Encodeur AAC brut (sans ADTS) ; l'AudioSpecificConfig déclarée au MP4 est construite ici
+     * à partir des paramètres réels de l'encodeur : esp_audio_codec 2.6.2 ne la fournit pas en
+     * AAC brut (spec_info_len = 0), ce qui privait les vidéos de leur piste son. */
     esp_aac_enc_config_t aac_cfg = ESP_AAC_ENC_CONFIG_DEFAULT();
     aac_cfg.sample_rate = AUDIO_SAMPLE_RATE;
     aac_cfg.channel = AUDIO_CHANNELS;
@@ -289,11 +398,20 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
     esp_audio_enc_get_info(s_au.enc, &enc_info);
     int in_size = 0, out_size = 0;
     esp_audio_enc_get_frame_size(s_au.enc, &in_size, &out_size);
-    if (enc_info.spec_info_len == 0 || in_size <= 0 || out_size <= 0) {
-        ESP_LOGE(TAG, "encodeur AAC : informations absentes");
+    const uint32_t rate = enc_info.sample_rate ? enc_info.sample_rate : AUDIO_SAMPLE_RATE;
+    const uint8_t channels = enc_info.channel ? enc_info.channel : AUDIO_CHANNELS;
+    if (in_size <= 0 || out_size <= 0 || !nid_aac_asc_lc(rate, channels, s_au.asc)) {
+        ESP_LOGE(TAG, "encodeur AAC : taille des trames ou format (%" PRIu32 " Hz, %u voie(s)) invalides",
+                 rate, (unsigned)channels);
         release_session();
         return ESP_FAIL;
     }
+    if (enc_info.spec_info_len > 0 &&
+        (enc_info.spec_info_len != NID_AAC_ASC_LEN || memcmp(enc_info.codec_spec_info, s_au.asc, NID_AAC_ASC_LEN) != 0)) {
+        ESP_LOGW(TAG, "AudioSpecificConfig de l'encodeur (%" PRIu32 " octets) différente de celle calculée : "
+                 "celle calculée est utilisée", enc_info.spec_info_len);
+    }
+    ESP_LOGD(TAG, "AAC-LC %" PRIu32 " Hz, %u voie(s), ASC %02X %02X", rate, (unsigned)channels, s_au.asc[0], s_au.asc[1]);
     s_au.pcm_size = in_size;
     s_au.out_size = out_size;
     s_au.pcm = heap_caps_malloc((size_t)in_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -330,13 +448,61 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
         return ESP_ERR_NO_MEM;
     }
 
-    info->sample_rate = AUDIO_SAMPLE_RATE;
-    info->channels = AUDIO_CHANNELS;
+    info->sample_rate = rate;
+    info->channels = channels;
     info->bits_per_sample = AUDIO_BITS;
     info->frame_ms = (uint32_t)((int64_t)in_size * 1000 / (AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * (AUDIO_BITS / 8)));
-    info->spec_info = enc_info.codec_spec_info;
-    info->spec_info_len = enc_info.spec_info_len;
+    info->spec_info = s_au.asc;
+    info->spec_info_len = NID_AAC_ASC_LEN;
     return ESP_OK;
+}
+
+esp_err_t nid_capture_audio_measure(uint32_t duration_ms, nid_capture_audio_level_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "paramètre absent");
+    ESP_RETURN_ON_FALSE(s_au.inited, ESP_ERR_INVALID_STATE, TAG, "micro non initialisé");
+    if (s_au.task != NULL) {
+        return ESP_ERR_INVALID_STATE;   /* séquence en cours : voir nid_capture_audio_get_last_level() */
+    }
+    const int block = MEASURE_BLOCK_SAMPLES * AUDIO_CHANNELS * (AUDIO_BITS / 8);
+    uint8_t *pcm = heap_caps_malloc((size_t)block, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(pcm != NULL, ESP_ERR_NO_MEM, TAG, "mémoire du vumètre");
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = AUDIO_SAMPLE_RATE,
+        .channel = AUDIO_CHANNELS,
+        .bits_per_sample = AUDIO_BITS,
+    };
+    if (esp_codec_dev_open(s_au.dev, &fs) != ESP_CODEC_DEV_OK) {
+        heap_caps_free(pcm);
+        return ESP_FAIL;
+    }
+    esp_codec_dev_set_in_gain(s_au.dev, AUDIO_IN_GAIN_DB);
+    const int64_t block_us = (int64_t)MEASURE_BLOCK_SAMPLES * 1000000 / AUDIO_SAMPLE_RATE;
+    int blocks = (int)(((int64_t)duration_ms * 1000 + block_us - 1) / block_us);
+    if (blocks < 1) {
+        blocks = 1;
+    }
+    uint32_t peak = 0;
+    uint64_t sum_sq = 0;
+    uint32_t count = 0;
+    esp_err_t err = ESP_OK;
+    /* Premier bloc écarté : mise en route du convertisseur (décalage, bruit d'ouverture). */
+    for (int i = 0; i <= blocks; i++) {
+        if (esp_codec_dev_read(s_au.dev, pcm, block) != ESP_CODEC_DEV_OK) {
+            err = ESP_FAIL;
+            break;
+        }
+        if (i > 0) {
+            block_level(pcm, block, &peak, &sum_sq, &count);
+            store_level(pcm, block);
+        }
+    }
+    esp_codec_dev_close(s_au.dev);
+    heap_caps_free(pcm);
+    if (err == ESP_OK) {
+        *out = make_level(peak, sum_sq, count);
+    }
+    return err;
 }
 
 void nid_capture_audio_deliver(int64_t t0_us)

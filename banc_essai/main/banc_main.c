@@ -1,24 +1,26 @@
 /*
  * Banc d'essai « Suivi nid » — validation pas à pas sur l'ESP32-P4X-Function-EV-Board
  *
- * Étape 1 : enregistrer une vidéo sur appui du bouton BOOT par le vrai chemin
- * du firmware de terrain (nid_storage_media_begin → nid_capture_record →
- * nid_storage_media_commit, ou nid_storage_media_abort), puis afficher le
- * bilan à l'écran, sur le journal série (ligne « BILAN ») et dans le journal
- * CSV de la carte SD.
+ * Le banc compile les modules du firmware de terrain (nid_board, nid_capture,
+ * nid_storage, nid_config, nid_detect, nid_ir, nid_power, nid_clock) sans les
+ * copier, et les essaie une fonction après l'autre avec l'écran 7 pouces comme
+ * tableau de bord (voir README.md).
  *
  * Tâches :
- *  - « banc_action » : seule tâche qui utilise la caméra : enregistrements et
- *    photos demandés par le bouton ou la console (un seul à la fois), viseur
- *    (aperçu de nid_capture, images remises à l'écran par le crochet de
- *    débogage) entre deux actions ;
- *  - « banc_bouton » : scrute le bouton (anti-rebond), demande un
- *    enregistrement ou l'arrêt anticipé de celui en cours ;
+ *  - « banc_action » : seule tâche qui utilise la caméra et le micro : vidéos
+ *    (manuelles, sur détection PIR, endurance), photos (manuelles, de suivi),
+ *    tests de la carte SD, vumètre, viseur (aperçu de nid_capture, images
+ *    remises à l'écran par le crochet de débogage) entre deux actions ;
+ *  - « banc_detect » (banc_detection.c) : fronts du PIR, validation selon la
+ *    sensibilité, en parallèle du démarrage de l'enregistrement ;
+ *  - « banc_bouton » : bouton BOOT (appui court : armer / désarmer ; appui long :
+ *    vidéo ; appui pendant un enregistrement : arrêt anticipé) ;
+ *  - « banc_ui » (banc_ui.c) : panneau d'état, onglets, boutons tactiles ;
  *  - console série (esp_console), voir banc_console.c.
  *
  * Aucune erreur ne redémarre la carte : elle est affichée (étape, code
- * d'erreur, piste de dépannage) et le banc reste utilisable : le prochain
- * appui réessaie le montage de la carte SD ou l'initialisation de la caméra.
+ * d'erreur, piste de dépannage) et le banc reste utilisable : la prochaine
+ * action réessaie le montage de la carte SD ou l'initialisation de la caméra.
  */
 #include "banc.h"
 
@@ -26,7 +28,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -47,68 +48,110 @@
 
 static const char *TAG = "banc";
 
-#define ID_SYSTEME              "BANC"
-#define ID_NID                  "N00"
-#define ETIQUETTE               "BANC N00"      /* incrusté après la date et l'heure */
-
 #define ACTION_PILE             (12 * 1024)
 #define ACTION_PRIO             5
 #define BOUTON_PILE             3072
 #define BOUTON_PRIO             4
 #define BOUTON_PERIODE_MS       10
 #define BOUTON_STABLE           3               /* 3 lectures identiques : 30 ms d'anti-rebond */
+#define BOUTON_LONG_MS          1000            /* appui long : vidéo manuelle */
 
 #define VISEUR_PERIODE_US       (1000000LL / 12)  /* viseur : 12 images par seconde au plus */
 #define VISEUR_QUALITE          30              /* qualité JPEG de l'aperçu (non utilisé par l'écran) */
 #define VISEUR_ATTENTE_MS       300
 #define VISEUR_ECHECS_MAX       10
-#define ENTETE_PERIODE_US       1000000LL
+#define NUIT_AUTO_PERIODE_US    (60LL * 1000000LL)
 
 #define HEURE_VALIDE_MIN        1704067200      /* 2024-01-01 : avant, l'heure n'est pas réglée */
-#define DUREE_MAX_S             300
-
-typedef enum {
-    ACTION_VIDEO = 0,
-    ACTION_PHOTO,
-} action_t;
-
-typedef struct {
-    action_t type;
-    uint32_t duree_s;
-    int64_t  t_demande_us;      /*!< instant de l'appui ou de la commande (esp_timer) */
-    char     origine[12];       /*!< « bouton » ou « console » */
-} demande_t;
 
 static QueueHandle_t s_file;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_occupe;                       /* action demandée ou en cours (sous s_mux) */
-static volatile bool s_enregistre;          /* enregistrement vidéo en cours */
-static volatile bool s_arret;               /* arrêt anticipé demandé par le bouton */
+static volatile bool s_arret;               /* arrêt anticipé demandé */
+
+static banc_etat_t s_etat = {
+    .latence_ms = -1,
+    .filtre_jour = -1,
+    .dernier_fichier = "aucun",
+    .photo_fichier = "aucune",
+};
+static portMUX_TYPE s_etat_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static nid_capture_settings_t s_reglages;
-static uint32_t s_seq_video;
-static uint32_t s_seq_photo;
-static volatile uint16_t s_img_w, s_img_h;  /* dernière image vue par le crochet */
-static uint64_t s_sd_libre;                 /* octets libres (mis à jour après chaque action) */
-static uint64_t s_sd_total;
+static nid_storage_volume_t s_volume;       /* volume de la carte (mis à jour après chaque action, sous s_mux) */
 static int s_recuperes = -1;                /* fichiers renommés _INCOMPLET au dernier montage */
-static char s_bilan[512] = "aucun";         /* dernière ligne de bilan (commande info) */
-
-/* Enregistrement en cours (affichage de la progression) */
-static int64_t s_t_debut_us;
-static uint32_t s_duree_s;
-static int32_t s_seconde_affichee;
 
 /* Viseur */
 static bool s_viseur_demarre;
 static int s_viseur_echecs;
 
+/* Copie du bandeau (page web, même sans écran), sous s_bandeau_mux */
+#define BANDEAU_TEXTE   160
+static char s_bandeau[BANC_NB_LIGNES][BANDEAU_TEXTE];
+static banc_couleur_t s_bandeau_couleur[BANC_NB_LIGNES];
+static portMUX_TYPE s_bandeau_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* ------------------------------------------------------------------------- */
+/* État partagé                                                               */
+/* ------------------------------------------------------------------------- */
+
+void banc_etat_lire(banc_etat_t *copie)
+{
+    portENTER_CRITICAL(&s_etat_mux);
+    *copie = s_etat;
+    portEXIT_CRITICAL(&s_etat_mux);
+}
+
+banc_etat_t *banc_etat_verrouiller(void)
+{
+    portENTER_CRITICAL(&s_etat_mux);
+    return &s_etat;
+}
+
+void banc_etat_deverrouiller(void)
+{
+    portEXIT_CRITICAL(&s_etat_mux);
+}
+
+const nid_capture_settings_t *banc_reglages_capture(void)
+{
+    return &s_reglages;
+}
+
+void banc_bandeau_noter(banc_ligne_t ligne, banc_couleur_t couleur, const char *texte)
+{
+    if (ligne >= BANC_NB_LIGNES) {
+        return;
+    }
+    portENTER_CRITICAL(&s_bandeau_mux);
+    strlcpy(s_bandeau[ligne], texte, BANDEAU_TEXTE);
+    s_bandeau_couleur[ligne] = couleur;
+    portEXIT_CRITICAL(&s_bandeau_mux);
+}
+
+void banc_bandeau_lire(banc_ligne_t ligne, char *out, size_t len, banc_couleur_t *couleur)
+{
+    if (ligne >= BANC_NB_LIGNES || len == 0) {
+        return;
+    }
+    char t[BANDEAU_TEXTE];
+    portENTER_CRITICAL(&s_bandeau_mux);
+    memcpy(t, s_bandeau[ligne], sizeof(t));
+    *couleur = s_bandeau_couleur[ligne];
+    portEXIT_CRITICAL(&s_bandeau_mux);
+    strlcpy(out, t, len);
+}
+
+bool banc_vumetre_demande(void)
+{
+    return banc_ui_onglet() == BANC_ONGLET_SON || banc_web_son_demande();
+}
+
 /* ------------------------------------------------------------------------- */
 /* Outils                                                                     */
 /* ------------------------------------------------------------------------- */
 
-/** Heure locale au format fmt (strftime). */
-static void heure_locale(char *out, size_t len, const char *fmt)
+void banc_heure_locale(char *out, size_t len, const char *fmt)
 {
     const time_t now = time(NULL);
     struct tm tm;
@@ -149,22 +192,60 @@ static void regler_heure_compilation(void)
              "la régler avec la commande « heure AAAA-MM-JJ HH:MM:SS »", __DATE__, __TIME__);
 }
 
-static void lire_espace_sd(void)
+esp_err_t banc_regler_heure(time_t t, const char *origine)
 {
-    if (nid_storage_get_space(&s_sd_total, &s_sd_libre) != ESP_OK) {
-        s_sd_total = 0;
-        s_sd_libre = 0;
+    if (t < (time_t)HEURE_VALIDE_MIN || t >= (time_t)4102444800LL) {     /* 2024-01-01 .. 2100-01-01 */
+        return ESP_ERR_INVALID_ARG;
     }
+    const time_t avant = time(NULL);
+    const struct timeval tv = { .tv_sec = t };
+    if (settimeofday(&tv, NULL) != 0) {
+        return ESP_FAIL;
+    }
+    char txt[24];
+    banc_heure_locale(txt, sizeof(txt), "%Y-%m-%d %H:%M:%S");
+    ESP_LOGI(TAG, "heure réglée (%s) : %s, écart %+lld s", origine, txt, (long long)(t - avant));
+    nid_storage_journal("heure_reglee", "%s (%s, écart %+lld s)", txt, origine, (long long)(t - avant));
+    banc_rafraichir_entete();
+    banc_nuit_actualiser(false);
+    return ESP_OK;
 }
 
-/** « 29.1 Go libres » ou « absente ». */
-static void texte_sd(char *out, size_t len)
+void banc_lire_espace_sd(void)
+{
+    nid_storage_volume_t v;
+    if (nid_storage_get_volume(&v, false) != ESP_OK) {
+        memset(&v, 0, sizeof(v));
+    }
+    portENTER_CRITICAL(&s_mux);
+    s_volume = v;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void banc_volume_sd(nid_storage_volume_t *v)
+{
+    portENTER_CRITICAL(&s_mux);
+    *v = s_volume;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void banc_espace_sd(uint64_t *total, uint64_t *libre)
+{
+    portENTER_CRITICAL(&s_mux);
+    *total = s_volume.volume_bytes;
+    *libre = s_volume.free_bytes;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void banc_texte_sd(char *out, size_t len)
 {
     if (!nid_storage_is_mounted()) {
         strlcpy(out, "absente", len);
         return;
     }
-    const uint64_t dixiemes = s_sd_libre / 100000000ULL;    /* dixièmes de Go (1 Go = 10^9 o) */
+    uint64_t total, libre;
+    banc_espace_sd(&total, &libre);
+    const uint64_t dixiemes = libre / 100000000ULL;    /* dixièmes de Go (1 Go = 10^9 o) */
     snprintf(out, len, "%" PRIu64 ".%" PRIu64 " Go libres", dixiemes / 10, dixiemes % 10);
 }
 
@@ -172,15 +253,14 @@ void banc_rafraichir_entete(void)
 {
     char sd[24];
     char heure[16];
-    texte_sd(sd, sizeof(sd));
-    heure_locale(heure, sizeof(heure), "%H:%M:%S");
-    banc_ecran_ligne(BANC_LIGNE_ENTETE, BANC_GRIS, "%s | %ux%u %u i/s %" PRIu32 " kbit/s%s%s | SD %s | %s",
+    banc_texte_sd(sd, sizeof(sd));
+    banc_heure_locale(heure, sizeof(heure), "%H:%M:%S");
+    banc_ecran_ligne(BANC_LIGNE_ENTETE, BANC_GRIS, "%s | %ux%u %u i/s %" PRIu32 " kbit/s%s | SD %s | %s",
                      nid_capture_sensor_name(), s_reglages.width, s_reglages.height, s_reglages.fps,
-                     s_reglages.bitrate_kbps, s_reglages.audio ? " son" : "", s_reglages.night ? " nuit" : "",
-                     sd, heure);
+                     s_reglages.bitrate_kbps, s_reglages.audio ? " son" : "", sd, heure);
 }
 
-static void effacer_details(void)
+void banc_effacer_details(void)
 {
     banc_ecran_ligne(BANC_LIGNE_DETAIL1, BANC_BLANC, "%s", "");
     banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC, "%s", "");
@@ -189,14 +269,11 @@ static void effacer_details(void)
 
 static void afficher_pret(void)
 {
-    banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_VERT, "Prêt — appuyez sur BOOT pour enregistrer %d s", CONFIG_BANC_DUREE_S);
+    banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_VERT, "%s",
+                     "Prêt — BOOT court : armer/désarmer, BOOT long : vidéo ; « help » sur la console");
 }
 
-/**
- * Affiche une erreur : étape et code (ligne d'état), piste de dépannage (une
- * ou deux lignes séparées par « \n »), puis la marche à suivre.
- */
-static void afficher_erreur(const char *etape, esp_err_t err, const char *piste)
+void banc_afficher_erreur(const char *etape, esp_err_t err, const char *piste)
 {
     char l1[160];
     const char *l2 = "";
@@ -211,11 +288,14 @@ static void afficher_erreur(const char *etape, esp_err_t err, const char *piste)
     banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_ROUGE, "ERREUR %s : %s", etape, esp_err_to_name(err));
     banc_ecran_ligne(BANC_LIGNE_DETAIL1, BANC_ROUGE, "%s", l1);
     banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_ROUGE, "%s", l2);
-    banc_ecran_ligne(BANC_LIGNE_DETAIL3, BANC_GRIS, "%s", "Corriger, puis appuyer sur BOOT pour réessayer");
+    banc_ecran_ligne(BANC_LIGNE_DETAIL3, BANC_GRIS, "%s", "Corriger, puis recommencer (BOOT, console ou écran)");
 }
 
 static const char *piste_sd(esp_err_t err)
 {
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        return "Fonction « carte SD » désactivée\n(écran de démarrage, « fonctions »)";
+    }
     if (err == ESP_FAIL) {
         return "Carte SD illisible : la formater en FAT32 sur un ordinateur\n"
                "(le banc ne formate jamais une carte)";
@@ -236,24 +316,6 @@ static const char *piste_camera(esp_err_t err)
            "commande « i2cscan » (SC2336 = 0x30, OV5647 = 0x36)";
 }
 
-static const char *piste_video(esp_err_t err)
-{
-    switch (err) {
-    case ESP_ERR_TIMEOUT:
-        return "Aucune image reçue de la caméra : nappe, alimentation ;\n"
-               "voir le journal série (nid_capture)";
-    case ESP_ERR_NO_MEM:
-        return "Mémoire insuffisante (multiplexeur MP4)";
-    case ESP_ERR_INVALID_RESPONSE:
-        return "Encodeur H.264 : image codée invalide\n(voir le journal série)";
-    case ESP_ERR_INVALID_STATE:
-        return "Caméra non prête : appuyer de nouveau sur BOOT";
-    default:
-        return "Écriture impossible : carte SD pleine, trop lente (A1/V30)\n"
-               "ou retirée ? Voir le journal série";
-    }
-}
-
 /* ------------------------------------------------------------------------- */
 /* Carte SD et caméra                                                         */
 /* ------------------------------------------------------------------------- */
@@ -262,20 +324,23 @@ static const char *piste_video(esp_err_t err)
  * Monte la carte, pose les identifiants puis renomme en « _INCOMPLET » les
  * fichiers interrompus (coupure pendant une écriture), comme le firmware.
  */
-static esp_err_t preparer_sd(void)
+esp_err_t banc_preparer_sd(void)
 {
     if (nid_storage_is_mounted()) {
         return ESP_OK;
     }
+    if (!banc_f_choisie(BANC_F_SD)) {
+        return ESP_ERR_NOT_SUPPORTED;   /* fonction désactivée : la carte n'est jamais montée */
+    }
     esp_err_t err = nid_storage_mount();
     if (err == ESP_OK) {
-        err = nid_storage_set_ids(ID_SYSTEME, ID_NID);
+        err = nid_storage_set_ids(BANC_ID_SYSTEME, BANC_ID_NID);
     }
     if (err != ESP_OK) {
         return err;
     }
     s_recuperes = nid_storage_recover();
-    lire_espace_sd();
+    banc_lire_espace_sd();
     if (s_recuperes > 0) {
         ESP_LOGW(TAG, "RECUPERATION fichiers_incomplets=%d (renommés _INCOMPLET dans %s)", s_recuperes,
                  nid_storage_base_dir());
@@ -291,7 +356,7 @@ static esp_err_t preparer_sd(void)
 static void afficher_sd(banc_ligne_t ligne)
 {
     char sd[24];
-    texte_sd(sd, sizeof(sd));
+    banc_texte_sd(sd, sizeof(sd));
     if (s_recuperes > 0) {
         banc_ecran_ligne(ligne, BANC_JAUNE, "Carte SD : %s ; %d fichier(s) interrompu(s) renommé(s) _INCOMPLET",
                          sd, s_recuperes);
@@ -311,192 +376,40 @@ static esp_err_t preparer_camera(void)
     if (err != ESP_OK) {
         banc_ecran_message_vue(BANC_ROUGE, "Caméra absente");
     }
+    banc_etat_t *e = banc_etat_verrouiller();
+    e->son_ok = (err == ESP_OK) && s_reglages.audio;
+    banc_etat_deverrouiller();
     return err;
 }
 
-/** Carte SD puis caméra ; en cas d'échec, l'erreur est affichée. */
-static bool preparer_tout(void)
+bool banc_preparer(void)
 {
-    esp_err_t err = preparer_sd();
-    if (err != ESP_OK) {
-        afficher_erreur("carte SD", err, piste_sd(err));
+    /* Fonction désactivée : refus ; en défaut (échec au démarrage) : nouvel essai. */
+    if (!banc_f_choisie(BANC_F_SD) || !banc_f_choisie(BANC_F_CAMERA)) {
+        const bool sd = !banc_f_choisie(BANC_F_SD);
+        banc_afficher_erreur(sd ? "carte SD" : "caméra", ESP_ERR_NOT_SUPPORTED,
+                             sd ? "Fonction « carte SD » désactivée\n(écran de démarrage, « fonctions »)"
+                                : "Fonction « caméra » désactivée\n(écran de démarrage, « fonctions »)");
         return false;
     }
+    esp_err_t err = banc_preparer_sd();
+    if (err != ESP_OK) {
+        banc_afficher_erreur("carte SD", err, piste_sd(err));
+        return false;
+    }
+    banc_f_retablir(BANC_F_SD);
     err = preparer_camera();
     if (err != ESP_OK) {
-        afficher_erreur("caméra", err, piste_camera(err));
+        banc_afficher_erreur("caméra", err, piste_camera(err));
         return false;
     }
+    banc_f_retablir(BANC_F_CAMERA);
     return true;
-}
-
-/* ------------------------------------------------------------------------- */
-/* Vidéo                                                                      */
-/* ------------------------------------------------------------------------- */
-
-/** Rappel de nid_capture_record (~ toutes les 100 ms) : progression, arrêt anticipé. */
-static bool rappel_enregistrement(void *arg)
-{
-    (void)arg;
-    const int32_t sec = (int32_t)((esp_timer_get_time() - s_t_debut_us) / 1000000LL);
-    if (sec != s_seconde_affichee) {
-        s_seconde_affichee = sec;
-        banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_ROUGE, "Enregistrement %" PRId32 "/%" PRIu32 " s — BOOT pour arrêter",
-                         sec, s_duree_s);
-    }
-    return s_arret;
-}
-
-static void bilan_video(const demande_t *d, const nid_media_file_t *f, const nid_capture_stats_t *st,
-                        esp_err_t err, bool finalisation, bool arrete)
-{
-    const uint32_t ms = st->duration_ms;
-    const uint32_t ips10 = ms ? (uint32_t)((uint64_t)st->video_frames * 10000ULL / ms) : 0;
-    const uint32_t mo100 = (uint32_t)(st->bytes / 10000ULL);    /* centièmes de Mo (1 Mo = 10^6 o) */
-    const uint32_t kbps = ms ? (uint32_t)(st->bytes * 8ULL / ms) : 0;
-    const int32_t premiere = st->first_frame_ms ? (int32_t)((int64_t)st->first_frame_ms - d->t_demande_us / 1000) : -1;
-    const bool ok = (err == ESP_OK);
-    const char *resultat = ok ? (arrete ? "OK_ARRET_ANTICIPE" : "OK") : "ECHEC";
-
-    snprintf(s_bilan, sizeof(s_bilan),
-             "BILAN video fichier=%s resultat=%s erreur=%s duree=%" PRIu32 ".%02" PRIu32 "s images=%" PRIu32
-             " cadence=%" PRIu32 ".%" PRIu32 "ips perdues=%" PRIu32 " trames_son=%" PRIu32 " taille=%" PRIu32
-             ".%02" PRIu32 "Mo debit=%" PRIu32 "kbit/s premiere_image=%" PRId32 "ms reglages=%ux%u,%uips,%" PRIu32
-             "kbit/s,son=%s capteur=%s",
-             f->name, resultat, esp_err_to_name(err), ms / 1000, (ms % 1000) / 10, st->video_frames,
-             ips10 / 10, ips10 % 10, st->dropped_frames, st->audio_frames, mo100 / 100, mo100 % 100, kbps,
-             premiere, s_reglages.width, s_reglages.height, s_reglages.fps, s_reglages.bitrate_kbps,
-             s_reglages.audio ? "oui" : "non", nid_capture_sensor_name());
-    ESP_LOGI(TAG, "%s", s_bilan);
-
-    if (ok) {
-        nid_storage_journal("video_banc", "%s;%" PRIu32 " ms;%" PRIu32 " images;%" PRIu32 ".%" PRIu32 " i/s;%" PRIu32
-                            " perdues;%" PRIu32 " trames son;%" PRIu32 ".%02" PRIu32 " Mo;%" PRIu32 " kbit/s;"
-                            "1re image %" PRId32 " ms;%s",
-                            f->name, ms, st->video_frames, ips10 / 10, ips10 % 10, st->dropped_frames,
-                            st->audio_frames, mo100 / 100, mo100 % 100, kbps, premiere, d->origine);
-        banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_VERT, "Vidéo enregistrée%s — BOOT : nouvel essai",
-                         arrete ? " (arrêt anticipé)" : "");
-        banc_ecran_ligne(BANC_LIGNE_DETAIL1, BANC_BLANC, "%s", f->name);
-    } else {
-        nid_storage_journal("erreur", "video_banc %s : %s (%s)", f->name, esp_err_to_name(err),
-                            finalisation ? "finalisation" : "enregistrement");
-        if (finalisation) {
-            afficher_erreur("finalisation", err, "Renommage .tmp → .mp4 impossible : carte SD retirée ?\n"
-                            "Le .tmp sera renommé _INCOMPLET au prochain démarrage");
-        } else {
-            afficher_erreur("enregistrement", err, piste_video(err));
-            banc_ecran_ligne(BANC_LIGNE_DETAIL3, BANC_GRIS, "%s", "Fichier partiel conservé sous le nom ..._INCOMPLET.mp4");
-        }
-        return;
-    }
-    banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC,
-                     "%" PRIu32 ".%02" PRIu32 " s | %" PRIu32 " images | %" PRIu32 ".%" PRIu32 " i/s | %" PRIu32
-                     " perdue(s) | son : %" PRIu32 " trames",
-                     ms / 1000, (ms % 1000) / 10, st->video_frames, ips10 / 10, ips10 % 10, st->dropped_frames,
-                     st->audio_frames);
-    banc_ecran_ligne(BANC_LIGNE_DETAIL3, st->dropped_frames ? BANC_JAUNE : BANC_BLANC,
-                     "%" PRIu32 ".%02" PRIu32 " Mo | %" PRIu32 " kbit/s | 1re image à %" PRId32 " ms de l'appui",
-                     mo100 / 100, mo100 % 100, kbps, premiere);
-}
-
-static void faire_video(const demande_t *d)
-{
-    effacer_details();
-    banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_JAUNE, "Préparation de l'enregistrement (%s)...", d->origine);
-    if (!preparer_tout()) {
-        return;
-    }
-    nid_media_file_t f;
-    esp_err_t err = nid_storage_media_begin(NID_MEDIA_VIDEO, time(NULL), ++s_seq_video, &f);
-    if (err != ESP_OK) {
-        afficher_erreur("fichier", err, "Carte SD pleine, protégée en écriture ou retirée ?");
-        return;
-    }
-
-    ESP_LOGI(TAG, "enregistrement de %" PRIu32 " s (%s) : %s", d->duree_s, d->origine, f.tmp_path);
-#if !CONFIG_BANC_VUE_ENREG
-    banc_ecran_message_vue(BANC_GRIS, "Vue coupée pendant l'enregistrement");
-#endif
-    s_duree_s = d->duree_s;
-    s_t_debut_us = esp_timer_get_time();
-    s_seconde_affichee = -1;
-    s_arret = false;
-    s_enregistre = true;
-    nid_capture_stats_t st;
-    err = nid_capture_record(f.tmp_path, d->duree_s * 1000u, rappel_enregistrement, NULL, &st);
-    s_enregistre = false;
-    const bool arrete = s_arret;
-    s_arret = false;
-
-    bool finalisation = false;
-    if (err == ESP_OK) {
-        err = nid_storage_media_commit(&f);       /* .tmp → nom définitif */
-        finalisation = (err != ESP_OK);
-    } else {
-        nid_storage_media_abort(&f, true);        /* conservé en _INCOMPLET, comme le firmware */
-    }
-    lire_espace_sd();
-    bilan_video(d, &f, &st, err, finalisation, arrete);
-    banc_rafraichir_entete();
-}
-
-/* ------------------------------------------------------------------------- */
-/* Photo                                                                      */
-/* ------------------------------------------------------------------------- */
-
-static void faire_photo(const demande_t *d)
-{
-    effacer_details();
-    banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_JAUNE, "Photo (%s)...", d->origine);
-    if (!preparer_tout()) {
-        return;
-    }
-    nid_media_file_t f;
-    esp_err_t err = nid_storage_media_begin(NID_MEDIA_PHOTO, time(NULL), ++s_seq_photo, &f);
-    if (err != ESP_OK) {
-        afficher_erreur("fichier", err, "Carte SD pleine, protégée en écriture ou retirée ?");
-        return;
-    }
-    err = nid_capture_photo(f.tmp_path);
-    if (err == ESP_OK) {
-        err = nid_storage_media_commit(&f);
-    } else {
-        nid_storage_media_abort(&f, false);
-    }
-    const uint32_t ms = (uint32_t)((esp_timer_get_time() - d->t_demande_us) / 1000);
-    struct stat sb;
-    const uint32_t ko = (err == ESP_OK && stat(f.final_path, &sb) == 0) ? (uint32_t)(sb.st_size / 1000) : 0;
-    lire_espace_sd();
-
-    snprintf(s_bilan, sizeof(s_bilan), "BILAN photo fichier=%s resultat=%s erreur=%s taille=%" PRIu32 "ko duree=%" PRIu32
-             "ms reglages=%ux%u,qualite=%u capteur=%s", f.name, err == ESP_OK ? "OK" : "ECHEC", esp_err_to_name(err),
-             ko, ms, s_reglages.width, s_reglages.height, s_reglages.jpeg_quality, nid_capture_sensor_name());
-    ESP_LOGI(TAG, "%s", s_bilan);
-    if (err == ESP_OK) {
-        nid_storage_journal("photo_banc", "%s;%" PRIu32 " ko;%" PRIu32 " ms;%s", f.name, ko, ms, d->origine);
-        banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_VERT, "%s", "Photo enregistrée — BOOT : vidéo");
-        banc_ecran_ligne(BANC_LIGNE_DETAIL1, BANC_BLANC, "%s", f.name);
-        banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC, "%" PRIu32 " ko | %" PRIu32 " ms depuis la commande", ko, ms);
-    } else {
-        nid_storage_journal("erreur", "photo_banc %s : %s", f.name, esp_err_to_name(err));
-        afficher_erreur("photo", err, piste_video(err));
-    }
-    banc_rafraichir_entete();
 }
 
 /* ------------------------------------------------------------------------- */
 /* Viseur et tâche d'action                                                   */
 /* ------------------------------------------------------------------------- */
-
-/** Crochet de nid_capture : chaque image capturée (viseur, vidéo, photo). */
-static void crochet_image(const nid_capture_frame_t *f, void *arg)
-{
-    (void)arg;
-    s_img_w = f->width;
-    s_img_h = f->height;
-    banc_ecran_image(f);
-}
 
 /** Une image du viseur : l'aperçu de nid_capture la remet au crochet, donc à l'écran. */
 static void viseur_image(void)
@@ -530,25 +443,55 @@ static void viseur_image(void)
     }
 }
 
+static void executer(const banc_demande_t *d)
+{
+    switch (d->type) {
+    case BANC_ACTION_VIDEO:
+    case BANC_ACTION_SON_VIDEO: {
+        banc_bilan_video_t b;
+        banc_video_enregistrer(d, d->param, d->type == BANC_ACTION_SON_VIDEO ? "test son" : "manuel", NULL, NULL,
+                               NULL, &b);
+        break;
+    }
+    case BANC_ACTION_PHOTO:
+        banc_photo_prendre(d, false);
+        break;
+    case BANC_ACTION_PHOTO_SUIVI:
+        banc_photo_prendre(d, true);
+        break;
+    case BANC_ACTION_DETECTION:
+        banc_detection_sequence(d);
+        break;
+    case BANC_ACTION_SD_TEST:
+        banc_sd_test(d);
+        break;
+    case BANC_ACTION_SD_SCAN:
+        banc_sd_scan();
+        break;
+    case BANC_ACTION_BOUCLE:
+        banc_boucle(d);
+        break;
+    }
+}
+
 static void tache_action(void *arg)
 {
     (void)arg;
     int64_t prochain_viseur = 0;
-    int64_t prochain_entete = 0;
+    int64_t prochain_nuit = 0;
     for (;;) {
-        const bool viseur = banc_ecran_ok() && nid_capture_is_ready();
+        /* Viseur : pour l'écran, ou pour la vue de la page web (banc sans écran). */
+        const bool viseur = (banc_ecran_ok() || banc_web_vue_active()) && nid_capture_is_ready();
         TickType_t attente = pdMS_TO_TICKS(200);
         if (viseur) {
             const int64_t reste_us = prochain_viseur - esp_timer_get_time();
             attente = (reste_us > 0) ? pdMS_TO_TICKS(reste_us / 1000) : 0;
         }
-        demande_t d;
+        banc_demande_t d;
         if (xQueueReceive(s_file, &d, attente) == pdTRUE) {
-            if (d.type == ACTION_VIDEO) {
-                faire_video(&d);
-            } else {
-                faire_photo(&d);
-            }
+            s_arret = false;
+            executer(&d);
+            s_arret = false;
             s_viseur_echecs = 0;    /* le viseur reprend (ou réessaie) après chaque action */
             portENTER_CRITICAL(&s_mux);
             s_occupe = false;
@@ -556,18 +499,26 @@ static void tache_action(void *arg)
             continue;
         }
         const int64_t now = esp_timer_get_time();
-        if (now >= prochain_entete) {
-            prochain_entete = now + ENTETE_PERIODE_US;
-            banc_rafraichir_entete();
+        if (now >= prochain_nuit) {
+            prochain_nuit = now + NUIT_AUTO_PERIODE_US;
+            banc_nuit_actualiser(false);
+        }
+        /* Photo de suivi due : prise comme une action (le bouton et la console attendent). */
+        if (banc_suivi_du() && banc_demander(BANC_ACTION_PHOTO_SUIVI, 0, 0, "suivi") == ESP_OK) {
+            continue;
+        }
+        /* Onglet « Son » ou section Son de la page web : vumètre (~200 ms par mesure, le viseur ralentit). */
+        if (banc_vumetre_demande() && nid_capture_is_ready() && banc_f_active(BANC_F_SON)) {
+            banc_son_mesurer();
         }
         if (viseur) {
-            prochain_viseur = now + VISEUR_PERIODE_US;
+            prochain_viseur = esp_timer_get_time() + VISEUR_PERIODE_US;
             viseur_image();
         }
     }
 }
 
-static esp_err_t demander(action_t type, uint32_t duree_s, const char *origine)
+esp_err_t banc_demander_a(banc_action_t type, uint32_t param, uint32_t param2, int64_t t_ref_us, const char *origine)
 {
     bool libre;
     portENTER_CRITICAL(&s_mux);
@@ -579,10 +530,11 @@ static esp_err_t demander(action_t type, uint32_t duree_s, const char *origine)
     if (!libre) {
         return ESP_ERR_INVALID_STATE;
     }
-    demande_t d = {
+    banc_demande_t d = {
         .type = type,
-        .duree_s = duree_s,
-        .t_demande_us = esp_timer_get_time(),
+        .param = param,
+        .param2 = param2,
+        .t_demande_us = t_ref_us,
     };
     strlcpy(d.origine, origine, sizeof(d.origine));
     if (xQueueSend(s_file, &d, 0) != pdTRUE) {
@@ -594,67 +546,100 @@ static esp_err_t demander(action_t type, uint32_t duree_s, const char *origine)
     return ESP_OK;
 }
 
-esp_err_t banc_demander_video(uint32_t duree_s, const char *origine)
+esp_err_t banc_demander(banc_action_t type, uint32_t param, uint32_t param2, const char *origine)
 {
-    if (duree_s < 1 || duree_s > DUREE_MAX_S) {
+    if ((type == BANC_ACTION_VIDEO || type == BANC_ACTION_SON_VIDEO) && (param < 1 || param > BANC_DUREE_MAX_S)) {
         return ESP_ERR_INVALID_ARG;
     }
-    return demander(ACTION_VIDEO, duree_s, origine);
+    return banc_demander_a(type, param, param2, esp_timer_get_time(), origine);
 }
 
-esp_err_t banc_demander_photo(const char *origine)
+bool banc_occupe(void)
 {
-    return demander(ACTION_PHOTO, 0, origine);
+    portENTER_CRITICAL(&s_mux);
+    const bool o = s_occupe;
+    portEXIT_CRITICAL(&s_mux);
+    return o;
 }
 
 bool banc_enregistrement_en_cours(void)
 {
-    return s_enregistre;
+    banc_etat_t *e = banc_etat_verrouiller();
+    const bool rec = e->rec;
+    banc_etat_deverrouiller();
+    return rec;
 }
 
-esp_err_t banc_regler_nuit(bool nuit)
+void banc_arreter(const char *origine)
 {
-    s_reglages.night = nuit;    /* repris à la prochaine initialisation de la caméra */
-    return nid_capture_set_night(nuit);
+    s_arret = true;
+    ESP_LOGI(TAG, "%s : arrêt anticipé demandé", origine);
+}
+
+bool banc_arret_demande(void)
+{
+    return s_arret;
 }
 
 /* ------------------------------------------------------------------------- */
 /* Bouton BOOT                                                                */
 /* ------------------------------------------------------------------------- */
 
-static void appui_bouton(void)
+static void appui_court(void)
 {
-    if (s_enregistre) {
-        s_arret = true;
-        ESP_LOGI(TAG, "bouton : arrêt anticipé demandé");
-        return;
-    }
-    esp_err_t err = banc_demander_video(CONFIG_BANC_DUREE_S, "bouton");
+    banc_etat_t e;
+    banc_etat_lire(&e);
+    banc_armer(!e.arme, "bouton");
+}
+
+static void appui_long(void)
+{
+    esp_err_t err = banc_demander(BANC_ACTION_VIDEO, CONFIG_BANC_DUREE_S, 0, "bouton");
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "bouton : enregistrement de %d s demandé", CONFIG_BANC_DUREE_S);
+        ESP_LOGI(TAG, "bouton (appui long) : vidéo de %d s demandée", CONFIG_BANC_DUREE_S);
     } else {
         ESP_LOGW(TAG, "bouton : action déjà en cours, appui ignoré");
     }
 }
 
+/**
+ * Appui pendant un enregistrement (ou une boucle d'endurance) : arrêt anticipé.
+ * Sinon : appui court (relâché avant 1 s) → armer / désarmer ; appui long → vidéo.
+ */
 static void tache_bouton(void *arg)
 {
     (void)arg;
     int stable = 1;     /* relâché (actif bas) */
     int compte = 0;
+    int64_t t_appui = 0;
+    bool traite = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(BOUTON_PERIODE_MS));
         const int niveau = gpio_get_level(CONFIG_BANC_BOUTON_GPIO);
+        if (stable == 0 && !traite && esp_timer_get_time() - t_appui >= BOUTON_LONG_MS * 1000LL) {
+            traite = true;
+            appui_long();
+        }
         if (niveau == stable) {
             compte = 0;
             continue;
         }
-        if (++compte >= BOUTON_STABLE) {
-            stable = niveau;
-            compte = 0;
-            if (stable == 0) {
-                appui_bouton();
+        if (++compte < BOUTON_STABLE) {
+            continue;
+        }
+        stable = niveau;
+        compte = 0;
+        if (stable == 0) {
+            t_appui = esp_timer_get_time();
+            traite = false;
+            banc_etat_t e;
+            banc_etat_lire(&e);
+            if (e.rec || e.boucle_en_cours) {
+                traite = true;
+                banc_arreter("bouton");
             }
+        } else if (!traite) {
+            appui_court();
         }
     }
 }
@@ -669,36 +654,84 @@ void banc_afficher_info(void)
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     char heure[24];
-    heure_locale(heure, sizeof(heure), "%Y-%m-%d %H:%M:%S");
-    if (nid_storage_is_mounted() && !s_enregistre) {
-        lire_espace_sd();
+    banc_heure_locale(heure, sizeof(heure), "%Y-%m-%d %H:%M:%S");
+    banc_etat_t e;
+    banc_etat_lire(&e);
+    if (nid_storage_is_mounted() && !e.rec) {
+        banc_lire_espace_sd();
     }
+    uint64_t total, libre;
+    banc_espace_sd(&total, &libre);
+    nid_config_t cfg;
+    banc_reglages(&cfg);
 
     printf("Banc d'essai %s (ESP-IDF %s), puce ESP32-P4 rév. %d.%d\n", app->version, app->idf_ver,
            chip.revision / 100, chip.revision % 100);
     printf("Heure      : %s (fuseau %s)\n", heure, CONFIG_BANC_FUSEAU);
-    printf("Capteur    : %s ; dernière image reçue : %ux%u\n", nid_capture_sensor_name(), s_img_w, s_img_h);
-    printf("Réglages   : %ux%u, %u i/s, %" PRIu32 " kbit/s, son %s, nuit %s, %d s par vidéo\n", s_reglages.width,
+    printf("Capteur    : %s\n", nid_capture_sensor_name());
+    printf("Réglages   : %ux%u, %u i/s, %" PRIu32 " kbit/s, son %s, %d s par vidéo manuelle\n", s_reglages.width,
            s_reglages.height, s_reglages.fps, s_reglages.bitrate_kbps, s_reglages.audio ? "oui" : "non",
-           s_reglages.night ? "oui" : "non", CONFIG_BANC_DUREE_S);
+           CONFIG_BANC_DUREE_S);
+    printf("Détection  : %s, séquence %u s, délai %u s, chauffe %u s, sensibilité %u, suivi %u min\n",
+           e.arme ? "armée" : "désarmée", cfg.seq_duration_s, cfg.trigger_delay_s, cfg.pir_warmup_s,
+           cfg.pir_sensitivity, cfg.photo_interval_min);
+    printf("Compteurs  : %" PRIu32 " fronts, %" PRIu32 " détections, %" PRIu32 " séquences, %" PRIu32
+           " fausses, %" PRIu32 " ignorées ; latence %" PRId32 " ms\n", e.fronts, e.detections, e.sequences,
+           e.fausses, e.ignorees, e.latence_ms);
     if (nid_storage_is_mounted()) {
         printf("Carte SD   : %" PRIu64 " / %" PRIu64 " Mo libres, dossier %s, %d fichier(s) _INCOMPLET au montage\n",
-               s_sd_libre / 1000000ULL, s_sd_total / 1000000ULL, nid_storage_base_dir(), s_recuperes);
+               libre / 1000000ULL, total / 1000000ULL, nid_storage_base_dir(), s_recuperes);
     } else {
         printf("Carte SD   : non montée\n");
     }
-    printf("Mémoire    : interne %u ko libres (plus grand bloc %u ko), PSRAM %u ko libres\n",
+    printf("Mémoire    : interne %u ko libres (plus grand bloc %u ko, minimum %u ko), PSRAM %u ko libres\n",
            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+           (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-    printf("Écran      : %s\n", banc_ecran_nom());
-    printf("État       : %s\n", s_enregistre ? "enregistrement en cours" : (s_occupe ? "action en cours" : "prêt"));
-    printf("Dernier    : %s\n", s_bilan);
+    printf("Écran      : %s ; tactile : %s ; onglet %s\n", banc_ecran_nom(), banc_tactile_nom(),
+           banc_ui_nom_onglet(banc_ui_onglet()));
+#if CONFIG_BANC_F_WIFI
+    banc_wifi_etat_t w;
+    banc_wifi_etat(&w);
+    if (w.demarre) {
+        printf("Wi-Fi      : %s « %s » %s, adresse %s ; C6 %s (« wifi » pour le détail)\n",
+               w.st.mode == NID_WIFI_MODE_AP ? "point d'accès" : "station", w.st.ssid, nid_wifi_state_str(w.st.state),
+               w.st.ip[0] ? w.st.ip : "-", w.version_c6);
+    } else
+#endif
+    {
+        const char *t = banc_f_texte(BANC_F_WIFI);
+        printf("Wi-Fi      : %s\n", t ? t : "arrêté");
+    }
+    printf("État       : %s\n", e.rec ? "enregistrement en cours" : (banc_occupe() ? "action en cours" : "prêt"));
+    printf("Dernier    : %s\n", banc_dernier_bilan());
 }
 
 /* ------------------------------------------------------------------------- */
 /* Démarrage                                                                  */
 /* ------------------------------------------------------------------------- */
+
+/** Bilan des fonctions (bandeau et journal série). */
+static void afficher_fonctions(void)
+{
+    char liste[160] = "";
+    int actives = 0;
+    for (int f = 0; f < BANC_NB_F; f++) {
+        const banc_fonction_etat_t e = banc_f_etat((banc_fonction_t)f);
+        if (e == BANC_FE_ACTIVE) {
+            actives++;
+        } else if (e != BANC_FE_NON_COMPILEE) {
+            char t[40];
+            snprintf(t, sizeof(t), "%s%s %s", liste[0] ? ", " : "", banc_f_nom((banc_fonction_t)f),
+                     banc_f_texte((banc_fonction_t)f));
+            strlcat(liste, t, sizeof(liste));
+        }
+    }
+    ESP_LOGI(TAG, "FONCTIONS actives=%d %s", actives, liste);
+    banc_ecran_ligne(BANC_LIGNE_DETAIL3, liste[0] ? BANC_JAUNE : BANC_BLANC, "Fonctions : %d active(s)%s%s", actives,
+                     liste[0] ? " ; " : "", liste);
+}
 
 void app_main(void)
 {
@@ -712,25 +745,10 @@ void app_main(void)
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "Banc d'essai Suivi nid %s", app->version);
 
-    s_reglages = (nid_capture_settings_t) {
-        .width = CONFIG_BANC_LARGEUR,
-        .height = CONFIG_BANC_HAUTEUR,
-        .fps = CONFIG_BANC_IPS,
-        .bitrate_kbps = CONFIG_BANC_DEBIT_KBPS,
-#if CONFIG_BANC_SON
-        .audio = true,
-#endif
-        .night = false,
-        .night_mono = true,
-        .jpeg_quality = CONFIG_BANC_QUALITE_JPEG,
-        .label = ETIQUETTE,
-    };
+    /* 1. Fonctions choisies au démarrage précédent (NVS). */
+    banc_fonctions_charger();
 
-    if (banc_ecran_init() == ESP_OK) {
-        banc_ecran_ligne(BANC_LIGNE_ENTETE, BANC_GRIS, "Banc d'essai Suivi nid %s — démarrage...", app->version);
-    }
-
-    /* Bouton BOOT (actif bas, rappel sur la carte ; tirage interne en plus). */
+    /* Bouton BOOT (actif bas, rappel sur la carte ; tirage interne en plus) : sert aussi à la sélection. */
     const gpio_config_t bouton = {
         .pin_bit_mask = 1ULL << CONFIG_BANC_BOUTON_GPIO,
         .mode = GPIO_MODE_INPUT,
@@ -739,43 +757,127 @@ void app_main(void)
     if (gpio_config(&bouton) != ESP_OK) {
         ESP_LOGE(TAG, "GPIO%d du bouton invalide (menu « Banc d'essai ») : console seule", CONFIG_BANC_BOUTON_GPIO);
     }
+    esp_err_t err_i2c = nid_board_i2c_init();
+    esp_err_t err;
 
-    esp_err_t err = nid_board_i2c_init();
-    if (err != ESP_OK) {
-        afficher_erreur("bus I2C", err, "Broches SDA/SCL : menu « Suivi nid — Carte et brochage »");
-    }
-
-    bool pret = true;
-    err = preparer_sd();
-    if (err != ESP_OK) {
-        afficher_erreur("carte SD", err, piste_sd(err));
-        pret = false;
-    } else {
-        afficher_sd(BANC_LIGNE_DETAIL1);
-    }
-
-    banc_ecran_message_vue(BANC_GRIS, "Initialisation de la caméra...");
-    nid_capture_set_frame_hook(crochet_image, NULL);
-    if (nid_board_i2c_bus() != NULL) {
-        err = preparer_camera();
+    /* 2. Écran, tactile et console : ils servent à l'écran de sélection. */
+    if (banc_f_choisie(BANC_F_ECRAN)) {
+        err = banc_ecran_init();
         if (err != ESP_OK) {
-            afficher_erreur("caméra", err, piste_camera(err));
-            pret = false;
-        } else if (pret) {
-            banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC, "Caméra : %s prête", nid_capture_sensor_name());
+            banc_f_defaut(BANC_F_ECRAN, err);
+        }
+    }
+    if (banc_f_active(BANC_F_TACTILE)) {
+        err = banc_tactile_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_TACTILE, err);
+        }
+    }
+    bool console_lancee = false;
+    if (banc_f_choisie(BANC_F_CONSOLE)) {
+        err = banc_console_demarrer();
+        console_lancee = true;
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_CONSOLE, err);
         }
     }
 
+    /* 3. Sélection (démarrage automatique sur la dernière sélection, mémorisée en NVS). */
+    banc_fonctions_selection();
+    if (banc_ecran_ok() && !banc_f_active(BANC_F_ECRAN)) {
+        banc_ecran_couper();
+    }
+    /* Fonctions d'interface réactivées pendant la sélection : initialisées maintenant. */
+    if (banc_f_active(BANC_F_ECRAN) && !banc_ecran_ok()) {
+        err = banc_ecran_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_ECRAN, err);
+        }
+    }
+    if (banc_f_active(BANC_F_TACTILE) && !banc_tactile_ok()) {
+        err = banc_tactile_init();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_TACTILE, err);
+        }
+    }
+    if (banc_f_choisie(BANC_F_CONSOLE) && !console_lancee) {
+        err = banc_console_demarrer();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_CONSOLE, err);
+        }
+    }
+    if (banc_ecran_ok()) {
+        banc_ecran_rect(&banc_ecran_zones()->vue, BANC_NOIR);
+        banc_ecran_rect(&banc_ecran_zones()->panneau, BANC_FOND);
+        banc_ecran_ligne(BANC_LIGNE_ENTETE, BANC_GRIS, "Banc d'essai Suivi nid %s — démarrage...", app->version);
+        banc_ecran_ligne(BANC_LIGNE_ETAT, BANC_JAUNE, "%s", "Initialisation des fonctions choisies...");
+        banc_effacer_details();
+    }
+    if (err_i2c != ESP_OK) {
+        banc_afficher_erreur("bus I2C", err_i2c, "Broches SDA/SCL : menu « Suivi nid — Carte et brochage »");
+    }
+
+    s_reglages = (nid_capture_settings_t) {
+        .width = CONFIG_BANC_LARGEUR,
+        .height = CONFIG_BANC_HAUTEUR,
+        .fps = CONFIG_BANC_IPS,
+        .bitrate_kbps = CONFIG_BANC_DEBIT_KBPS,
+        .audio = banc_f_active(BANC_F_SON),
+        .night = false,
+        .night_mono = true,
+        .jpeg_quality = CONFIG_BANC_QUALITE_JPEG,
+        .label = BANC_ETIQUETTE,
+    };
+
+    /* 4. Chaque fonction choisie est initialisée ; un échec la met « en défaut » sans bloquer les autres. */
+    banc_tests_init();      /* nuit (LED IR, IR-cut), batterie, température selon la sélection */
+    err = banc_detection_init();    /* réglages ; PIR et interruptions si la fonction est active */
+    if (err != ESP_OK && banc_f_active(BANC_F_PIR)) {
+        banc_f_defaut(BANC_F_PIR, err);
+    }
+
+    bool pret = true;
+    if (banc_f_active(BANC_F_SD)) {
+        err = banc_preparer_sd();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_SD, err);
+            banc_afficher_erreur("carte SD", err, piste_sd(err));
+            pret = false;
+        } else {
+            afficher_sd(BANC_LIGNE_DETAIL1);
+        }
+    }
+
+    nid_capture_set_frame_hook(banc_crochet_image, NULL);
+    if (banc_f_active(BANC_F_CAMERA)) {
+        banc_ecran_message_vue(BANC_GRIS, "Initialisation de la caméra...");
+        err = (nid_board_i2c_bus() != NULL) ? preparer_camera() : ESP_ERR_INVALID_STATE;
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_CAMERA, err);
+            banc_afficher_erreur("caméra", err, piste_camera(err));
+            pret = false;
+        } else {
+            banc_ecran_ligne(BANC_LIGNE_DETAIL2, BANC_BLANC, "Caméra : %s prête", nid_capture_sensor_name());
+            nid_capture_audio_level_t niveau;
+            if (s_reglages.audio && nid_capture_audio_level(100, &niveau) == ESP_ERR_NOT_SUPPORTED) {
+                banc_f_defaut(BANC_F_SON, ESP_ERR_NOT_FOUND);   /* ES8311 absent ou muet : vidéo seule */
+            }
+        }
+    } else {
+        banc_ecran_message_vue(BANC_GRIS, "Caméra désactivée");
+    }
+    banc_nuit_actualiser(true);
+
     char sd[24];
-    texte_sd(sd, sizeof(sd));
+    banc_texte_sd(sd, sizeof(sd));
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     nid_storage_journal("demarrage_banc", "banc %s;puce rév. %d.%d;capteur %s;%ux%u %u i/s %" PRIu32 " kbit/s son %s;SD %s",
                         app->version, chip.revision / 100, chip.revision % 100, nid_capture_sensor_name(),
                         s_reglages.width, s_reglages.height, s_reglages.fps, s_reglages.bitrate_kbps,
-                        s_reglages.audio ? "oui" : "non", sd);
+                        banc_f_active(BANC_F_SON) ? "oui" : "non", sd);
 
-    s_file = xQueueCreate(1, sizeof(demande_t));
+    s_file = xQueueCreate(1, sizeof(banc_demande_t));
     if (s_file == NULL ||
         xTaskCreate(tache_action, "banc_action", ACTION_PILE, NULL, ACTION_PRIO, NULL) != pdPASS ||
         xTaskCreate(tache_bouton, "banc_bouton", BOUTON_PILE, NULL, BOUTON_PRIO, NULL) != pdPASS) {
@@ -786,12 +888,22 @@ void app_main(void)
     if (pret) {
         afficher_pret();
     }
+    afficher_fonctions();
     banc_rafraichir_entete();
-
-    err = banc_console_demarrer();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "console série indisponible : %s (le bouton BOOT reste utilisable)", esp_err_to_name(err));
+    if (banc_f_active(BANC_F_ECRAN)) {
+        err = banc_ui_demarrer();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "tâche d'affichage : %s", esp_err_to_name(err));
+        }
     }
-    ESP_LOGI(TAG, "prêt : bouton BOOT (GPIO%d) ou commande « video » ; « help » pour la liste des commandes",
+    /* Wi-Fi en dernier (comme le firmware : carte SD montée avant le transport
+     * SDIO du C6) ; démarrage en tâche de fond, un échec le met « en défaut ». */
+    if (banc_f_active(BANC_F_WIFI)) {
+        err = banc_wifi_demarrer();
+        if (err != ESP_OK) {
+            banc_f_defaut(BANC_F_WIFI, err);
+        }
+    }
+    ESP_LOGI(TAG, "prêt : BOOT court = armer/désarmer, BOOT long = vidéo (GPIO%d) ; « help » pour les commandes",
              CONFIG_BANC_BOUTON_GPIO);
 }

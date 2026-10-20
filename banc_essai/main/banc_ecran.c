@@ -11,11 +11,23 @@
  * (1 Gbit/s), temporisations des panneaux (macros des pilotes), broches de
  * rétroéclairage (GPIO26) et de reset (GPIO27) de l'écran 7 pouces du kit.
  *
- * Mise en page : vue caméra en haut (image YUV 4:2:0 de la caméra convertie en
- * RGB565 et mise à l'échelle par le PPA, écrite directement dans le tampon
- * d'image), bandeau d'état en bas (police 5x7 de l'incrustation, agrandie ×2,
- * dessinée par le processeur). Le contrôleur DPI balaie le tampon (PSRAM) en
- * continu : une image peut se déchirer, sans importance pour un écran de contrôle.
+ * Mise en page (écran 1024x600 en paysage ; en portrait, panneau sous la vue) :
+ *
+ *   +----------------------------------------------------------------+
+ *   | DÉTECTION | PHOTO | NUIT | SON | SYSTÈME            (onglets)   |
+ *   +--------------------------------------+-------------------------+
+ *   |                                      | panneau de l'onglet      |
+ *   |   vue caméra (PPA : YUV → RGB565)    | (pastilles, compteurs)   |
+ *   |                                      +-------------------------+
+ *   |                                      | ARMER VIDÉO PHOTO NUIT  |
+ *   +--------------------------------------+-------------------------+
+ *   | bandeau : en-tête, état, 3 lignes de détail                     |
+ *   +----------------------------------------------------------------+
+ *
+ * Texte : police 5x7 de l'incrustation (nid_overlay), agrandie ×2 à ×4,
+ * dessinée par le processeur directement dans le tampon d'image (PSRAM), que
+ * le contrôleur DPI balaie en continu : une image peut se déchirer, sans
+ * importance pour un écran de contrôle.
  *
  * LDO VO3 : la caméra l'acquiert aussi (esp_video, même canal, même tension
  * 2,5 V, non réglable). Le pilote LDO compte les références : l'arrêt de la
@@ -25,6 +37,8 @@
  * processeur, images écrites par le PPA). Le texte est réécrit en mémoire
  * (cache C2M) avant de rendre le mutex : le PPA, qui invalide le cache sur sa
  * zone de sortie, ne peut pas effacer une écriture du processeur en attente.
+ * Pendant un enregistrement, la vue ne prend le mutex que s'il est libre : la
+ * tâche d'enregistrement n'attend jamais l'écran.
  */
 #include "banc.h"
 
@@ -66,22 +80,33 @@ static const char *TAG = "banc_ecran";
 #define CAR_H(e)                (NID_OVERLAY_CELL_H * (e))
 #define LIGNE_H                 (CAR_H(ECHELLE_TEXTE) + 4)
 #define MARGE_X                 8
+#define MARGE_TEXTE             6
 #define SEPARATION_H            2
-#define BANDEAU_H               (SEPARATION_H + 4 + BANC_NB_LIGNES * LIGNE_H)
+#define BANDEAU_H               (SEPARATION_H + 8 + BANC_NB_LIGNES * LIGNE_H)
+#define ONGLETS_H               44
+#define BOUTONS_H               76
+#define PANNEAU_L               420     /* largeur du panneau en paysage */
+#define ESPACE                  4
 #define ECHELLE_VUE_MAX         32      /* agrandissement max de la vue : 32/16 = ×2 */
-#define TEXTE_MAX               160
+#define TEXTE_MAX               192
 
 #define RGB565(r, g, b)         ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 #define FOND_VUE                RGB565(0, 0, 0)
-#define FOND_BANDEAU            RGB565(16, 16, 28)
 #define COULEUR_SEPARATION      RGB565(90, 90, 90)
 
-static const uint16_t s_couleurs[] = {
-    [BANC_BLANC] = RGB565(255, 255, 255),
-    [BANC_GRIS]  = RGB565(150, 150, 150),
-    [BANC_VERT]  = RGB565(70, 230, 70),
-    [BANC_JAUNE] = RGB565(255, 200, 0),
-    [BANC_ROUGE] = RGB565(255, 70, 70),
+static const uint16_t s_couleurs[BANC_NB_COULEURS] = {
+    [BANC_BLANC]      = RGB565(255, 255, 255),
+    [BANC_GRIS]       = RGB565(150, 150, 150),
+    [BANC_VERT]       = RGB565(70, 230, 70),
+    [BANC_JAUNE]      = RGB565(255, 200, 0),
+    [BANC_ROUGE]      = RGB565(255, 70, 70),
+    [BANC_NOIR]       = RGB565(0, 0, 0),
+    [BANC_FOND]       = RGB565(16, 16, 28),
+    [BANC_GRIS_FONCE] = RGB565(60, 60, 70),
+    [BANC_VERT_FONCE] = RGB565(0, 120, 40),
+    [BANC_ROUGE_VIF]  = RGB565(220, 0, 0),
+    [BANC_ORANGE]     = RGB565(230, 120, 0),
+    [BANC_BLEU]       = RGB565(30, 90, 200),
 };
 
 static struct {
@@ -96,8 +121,7 @@ static struct {
     uint16_t                 *fb;           /*!< tampon d'image RGB565 (PSRAM) */
     size_t                    fb_size;
     uint16_t                  w, h;         /*!< taille de l'écran */
-    uint16_t                  vue_h;        /*!< hauteur de la zone de vue */
-    uint16_t                  bandeau_y;    /*!< première ligne du bandeau */
+    banc_zones_t              zones;
     uint16_t                  img_w, img_h; /*!< taille de la dernière image affichée */
     bool                      vue_sale;     /*!< zone de vue à effacer avant la prochaine image */
     bool                      erreur_ppa;   /*!< erreur PPA déjà signalée */
@@ -134,6 +158,7 @@ static const translit_t s_translit[] = {
     { 0x202F, ' ', 0 }, { 0x2013, '-', 0 }, { 0x2014, '-', 0 }, { 0x2192, '>', 0 },
     { 0x00AB, '"', 0 }, { 0x00BB, '"', 0 }, { 0x2019, '\'', 0 }, { 0x2026, '.', 0 },
     { 0x00B0, 'o', 0 }, { 0x00D7, 'x', 0 }, { 0x2265, '>', 0 }, { 0x2264, '<', 0 },
+    { 0x00B5, 'u', 0 },
 };
 
 /** Point de code UTF-8 suivant ; avance *p (séquence invalide : « ? »). */
@@ -197,9 +222,20 @@ static void glyphe(uint32_t code, uint8_t g[NID_OVERLAY_CELL_H])
     }
 }
 
-static void remplir(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t couleur)
+/** Nombre de caractères affichés (et non d'octets) jusqu'à la fin ou au premier « \n ». */
+static size_t longueur_ligne(const char *p)
 {
-    for (uint32_t r = y; r < (uint32_t)y + h && r < s_ec.h; r++) {
+    size_t n = 0;
+    while (*p != '\0' && *p != '\n') {
+        utf8_suivant(&p);
+        n++;
+    }
+    return n;
+}
+
+static void remplir(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t couleur)
+{
+    for (uint32_t r = y; r < y + h && r < s_ec.h; r++) {
         uint16_t *p = s_ec.fb + (size_t)r * s_ec.w + x;
         for (uint32_t c = 0; c < w && x + c < s_ec.w; c++) {
             p[c] = couleur;
@@ -207,18 +243,25 @@ static void remplir(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t cou
     }
 }
 
-/** Écrit le texte à partir de (x, y), complète la ligne de fond jusqu'à x_max. */
-static void dessiner_texte(uint16_t x, uint16_t y, const char *texte, uint16_t encre, uint16_t fond,
-                           uint16_t x_max, int e)
+/**
+ * Écrit une ligne de texte à partir de (x, y), sans dépasser x_max ni y_max
+ * (caractères coupés) ; s'arrête à la fin ou au premier « \n ».
+ */
+static void dessiner_ligne(uint32_t x, uint32_t y, const char *texte, uint16_t encre, uint16_t fond,
+                           uint32_t x_max, uint32_t y_max, int e)
 {
     const char *p = texte;
     uint32_t cx = x;
-    while (*p != '\0' && cx + CAR_L(e) <= x_max) {
+    while (*p != '\0' && *p != '\n' && cx + CAR_L(e) <= x_max) {
         uint8_t g[NID_OVERLAY_CELL_H];
         glyphe(utf8_suivant(&p), g);
         for (int r = 0; r < NID_OVERLAY_CELL_H; r++) {
             for (int sy = 0; sy < e; sy++) {
-                uint16_t *px = s_ec.fb + (size_t)(y + r * e + sy) * s_ec.w + cx;
+                const uint32_t py = y + (uint32_t)(r * e + sy);
+                if (py >= y_max || py >= s_ec.h) {
+                    break;
+                }
+                uint16_t *px = s_ec.fb + (size_t)py * s_ec.w + cx;
                 for (int c = 0; c < NID_OVERLAY_CELL_W; c++) {
                     const uint16_t v = (c < 5 && (g[r] & (0x10 >> c))) ? encre : fond;
                     for (int sx = 0; sx < e; sx++) {
@@ -229,15 +272,18 @@ static void dessiner_texte(uint16_t x, uint16_t y, const char *texte, uint16_t e
         }
         cx += CAR_L(e);
     }
-    if (cx < x_max) {
-        remplir((uint16_t)cx, y, (uint16_t)(x_max - cx), CAR_H(e), fond);
-    }
 }
 
 /** Écrit en mémoire (cache → PSRAM) les lignes y0..y1 du tampon, lues par le contrôleur DPI. */
-static void publier(uint16_t y0, uint16_t y1)
+static void publier(uint32_t y0, uint32_t y1)
 {
-    esp_err_t err = esp_lcd_panel_draw_bitmap(s_ec.panel, 0, y0, s_ec.w, y1, s_ec.fb + (size_t)y0 * s_ec.w);
+    if (y1 > s_ec.h) {
+        y1 = s_ec.h;
+    }
+    if (y0 >= y1) {
+        return;
+    }
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_ec.panel, 0, (int)y0, s_ec.w, (int)y1, s_ec.fb + (size_t)y0 * s_ec.w);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "rafraîchissement de l'écran : %s", esp_err_to_name(err));
     }
@@ -245,8 +291,9 @@ static void publier(uint16_t y0, uint16_t y1)
 
 static void effacer_vue(void)
 {
-    remplir(0, 0, s_ec.w, s_ec.vue_h, FOND_VUE);
-    publier(0, s_ec.vue_h);
+    const banc_rect_t *v = &s_ec.zones.vue;
+    remplir(v->x, v->y, v->w, v->h, FOND_VUE);
+    publier(v->y, (uint32_t)v->y + v->h);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -349,6 +396,29 @@ static esp_err_t creer_panneau(void)
     return ESP_OK;
 }
 
+/** Zones de l'écran : paysage (panneau à droite de la vue) ou portrait (panneau sous la vue). */
+static void calculer_zones(void)
+{
+    banc_zones_t *z = &s_ec.zones;
+    const uint16_t w = s_ec.w;
+    const uint16_t h = s_ec.h;
+    z->onglets = (banc_rect_t){ 0, 0, w, ONGLETS_H };
+    z->bandeau = (banc_rect_t){ 0, (uint16_t)(h - BANDEAU_H), w, BANDEAU_H };
+    const uint16_t haut = ONGLETS_H + ESPACE;
+    const uint16_t bas = (uint16_t)(z->bandeau.y - ESPACE);
+    if (w >= h) {
+        z->panneau = (banc_rect_t){ (uint16_t)(w - PANNEAU_L), haut, PANNEAU_L, (uint16_t)(bas - haut) };
+        z->vue = (banc_rect_t){ 0, haut, (uint16_t)(w - PANNEAU_L - ESPACE), (uint16_t)(bas - haut) };
+    } else {
+        const uint16_t vh = (uint16_t)(w * 9u / 16u);
+        z->vue = (banc_rect_t){ 0, haut, w, vh };
+        const uint16_t py = (uint16_t)(haut + vh + ESPACE);
+        z->panneau = (banc_rect_t){ 0, py, w, (uint16_t)(bas - py) };
+    }
+    z->boutons = (banc_rect_t){ z->panneau.x, (uint16_t)(z->panneau.y + z->panneau.h - BOUTONS_H), z->panneau.w,
+                                BOUTONS_H };
+}
+
 esp_err_t banc_ecran_init(void)
 {
     if (s_ec.ok) {
@@ -398,20 +468,19 @@ esp_err_t banc_ecran_init(void)
         return err;
     }
 
-    /* Mise en page : bandeau en bas, vue au-dessus. */
-    s_ec.bandeau_y = (uint16_t)(s_ec.h - BANDEAU_H);
-    s_ec.vue_h = (uint16_t)(s_ec.bandeau_y - 2);
-    remplir(0, 0, s_ec.w, s_ec.vue_h, FOND_VUE);
-    remplir(0, s_ec.vue_h, s_ec.w, 2, FOND_VUE);
-    remplir(0, s_ec.bandeau_y, s_ec.w, SEPARATION_H, COULEUR_SEPARATION);
-    remplir(0, (uint16_t)(s_ec.bandeau_y + SEPARATION_H), s_ec.w, (uint16_t)(BANDEAU_H - SEPARATION_H), FOND_BANDEAU);
+    calculer_zones();
+    const banc_zones_t *z = &s_ec.zones;
+    remplir(0, 0, s_ec.w, s_ec.h, s_couleurs[BANC_FOND]);
+    remplir(z->vue.x, z->vue.y, z->vue.w, z->vue.h, FOND_VUE);
+    remplir(0, z->bandeau.y, s_ec.w, SEPARATION_H, COULEUR_SEPARATION);
     publier(0, s_ec.h);
     s_ec.ok = true;
 
 #if CONFIG_BANC_ECRAN_RETRO_GPIO >= 0
     gpio_set_level(CONFIG_BANC_ECRAN_RETRO_GPIO, 1);
 #endif
-    ESP_LOGI(TAG, "écran %s prêt (vue %ux%u, bandeau de %d lignes)", s_ec.nom, s_ec.w, s_ec.vue_h, BANC_NB_LIGNES);
+    ESP_LOGI(TAG, "écran %s prêt (vue %ux%u, panneau %ux%u, bandeau de %d lignes)", s_ec.nom, z->vue.w, z->vue.h,
+             z->panneau.w, z->panneau.h, BANC_NB_LIGNES);
     return ESP_OK;
 }
 
@@ -420,9 +489,40 @@ bool banc_ecran_ok(void)
     return s_ec.ok;
 }
 
+void banc_ecran_couper(void)
+{
+    if (!s_ec.ok) {
+        return;
+    }
+    xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
+    remplir(0, 0, s_ec.w, s_ec.h, FOND_VUE);
+    publier(0, s_ec.h);
+    s_ec.ok = false;        /* plus aucun dessin ; le panneau reste initialisé */
+    xSemaphoreGive(s_ec.mutex);
+#if CONFIG_BANC_ECRAN_RETRO_GPIO >= 0
+    gpio_set_level(CONFIG_BANC_ECRAN_RETRO_GPIO, 0);
+#endif
+    strlcpy(s_ec.nom, "désactivé", sizeof(s_ec.nom));
+}
+
 const char *banc_ecran_nom(void)
 {
     return s_ec.nom;
+}
+
+const banc_zones_t *banc_ecran_zones(void)
+{
+    return &s_ec.zones;
+}
+
+uint16_t banc_ecran_car_l(int echelle)
+{
+    return (uint16_t)CAR_L(echelle);
+}
+
+uint16_t banc_ecran_car_h(int echelle)
+{
+    return (uint16_t)CAR_H(echelle);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -441,16 +541,16 @@ void banc_ecran_image(const nid_capture_frame_t *f)
         if (now - s_ec.t_vue_us < 1000000LL / CONFIG_BANC_VUE_ENREG_IPS) {
             return;
         }
-        s_ec.t_vue_us = now;
 #else
         return;
 #endif
     }
 
     /* Plus grand facteur k/16 (pas du PPA) qui fait tenir l'image dans la zone de vue. */
+    const banc_rect_t *v = &s_ec.zones.vue;
     uint32_t k = ECHELLE_VUE_MAX;
-    const uint32_t kx = 16u * s_ec.w / f->width;
-    const uint32_t ky = 16u * s_ec.vue_h / f->height;
+    const uint32_t kx = 16u * v->w / f->width;
+    const uint32_t ky = 16u * v->h / f->height;
     if (kx < k) {
         k = kx;
     }
@@ -479,8 +579,8 @@ void banc_ecran_image(const nid_capture_frame_t *f)
             .buffer_size = (uint32_t)s_ec.fb_size,
             .pic_w = s_ec.w,
             .pic_h = s_ec.h,
-            .block_offset_x = (s_ec.w - ow) / 2u,
-            .block_offset_y = (s_ec.vue_h - oh) / 2u,
+            .block_offset_x = v->x + (v->w - ow) / 2u,
+            .block_offset_y = v->y + (v->h - oh) / 2u,
             .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
@@ -489,7 +589,13 @@ void banc_ecran_image(const nid_capture_frame_t *f)
         .mode = PPA_TRANS_MODE_BLOCKING,
     };
 
-    xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
+    /* Pendant un enregistrement : image sautée si l'écran est occupé (jamais d'attente). */
+    if (xSemaphoreTake(s_ec.mutex, f->recording ? 0 : portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    if (f->recording) {
+        s_ec.t_vue_us = esp_timer_get_time();
+    }
     if (s_ec.vue_sale || ow != s_ec.img_w || oh != s_ec.img_h) {
         effacer_vue();      /* changement de taille ou message : restes à effacer */
         s_ec.vue_sale = false;
@@ -509,20 +615,112 @@ void banc_ecran_message_vue(banc_couleur_t couleur, const char *texte)
     if (!s_ec.ok || texte == NULL) {
         return;
     }
-    /* Longueur affichée (caractères, pas octets) pour centrer le texte. */
-    size_t n = 0;
-    for (const char *p = texte; *p != '\0'; n++) {
-        utf8_suivant(&p);
+    /* La vue est marquée « à effacer » : la prochaine image remplace le message. */
+    banc_ecran_texte(&s_ec.zones.vue, ECHELLE_MESSAGE, couleur, BANC_NOIR, true, texte);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Dessin                                                                     */
+/* ------------------------------------------------------------------------- */
+
+void banc_ecran_rect(const banc_rect_t *r, banc_couleur_t couleur)
+{
+    if (!s_ec.ok || r == NULL || couleur >= BANC_NB_COULEURS) {
+        return;
     }
-    const uint32_t largeur = (uint32_t)n * CAR_L(ECHELLE_MESSAGE);
-    const uint16_t x = (largeur < s_ec.w) ? (uint16_t)((s_ec.w - largeur) / 2u) : 0;
-    const uint16_t y = (uint16_t)((s_ec.vue_h - CAR_H(ECHELLE_MESSAGE)) / 2u);
+    xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
+    remplir(r->x, r->y, r->w, r->h, s_couleurs[couleur]);
+    publier(r->y, (uint32_t)r->y + r->h);
+    xSemaphoreGive(s_ec.mutex);
+}
+
+void banc_ecran_texte(const banc_rect_t *r, int echelle, banc_couleur_t encre, banc_couleur_t fond, bool centre,
+                      const char *texte)
+{
+    if (!s_ec.ok || r == NULL || texte == NULL || encre >= BANC_NB_COULEURS || fond >= BANC_NB_COULEURS) {
+        return;
+    }
+    if (echelle < 1) {
+        echelle = 1;
+    }
+    size_t lignes = 1;
+    for (const char *p = texte; *p != '\0'; p++) {
+        lignes += (*p == '\n');
+    }
+    const uint32_t interligne = CAR_H(echelle) + (uint32_t)echelle * 2u;
+    const uint32_t haut_texte = (uint32_t)lignes * interligne;
+    uint32_t y = r->y + MARGE_TEXTE;
+    if (centre) {
+        y = r->y + (haut_texte < r->h ? (r->h - haut_texte) / 2u + (uint32_t)echelle : 0);
+    }
+    const uint32_t x_max = (uint32_t)r->x + r->w - (centre ? 0 : MARGE_TEXTE);
+    const uint32_t y_max = (uint32_t)r->y + r->h;
 
     xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
-    remplir(0, 0, s_ec.w, s_ec.vue_h, FOND_VUE);
-    dessiner_texte(x, y, texte, s_couleurs[couleur], FOND_VUE, s_ec.w, ECHELLE_MESSAGE);
-    publier(0, s_ec.vue_h);
-    s_ec.vue_sale = true;
+    remplir(r->x, r->y, r->w, r->h, s_couleurs[fond]);
+    const char *p = texte;
+    while (y < y_max) {
+        uint32_t x = (uint32_t)r->x + MARGE_TEXTE;
+        if (centre) {
+            const uint32_t largeur = (uint32_t)longueur_ligne(p) * CAR_L(echelle);
+            x = r->x + (largeur < r->w ? (r->w - largeur) / 2u : 0);
+        }
+        dessiner_ligne(x, y, p, s_couleurs[encre], s_couleurs[fond], x_max, y_max, echelle);
+        const char *nl = strchr(p, '\n');
+        if (nl == NULL) {
+            break;
+        }
+        p = nl + 1;
+        y += interligne;
+    }
+    if (r == &s_ec.zones.vue) {
+        s_ec.vue_sale = true;
+    }
+    publier(r->y, y_max);
+    xSemaphoreGive(s_ec.mutex);
+}
+
+void banc_ecran_barre(const banc_rect_t *r, int pour_mille, int repere_pour_mille, banc_couleur_t couleur,
+                      banc_couleur_t fond)
+{
+    if (!s_ec.ok || r == NULL || couleur >= BANC_NB_COULEURS || fond >= BANC_NB_COULEURS) {
+        return;
+    }
+    if (pour_mille < 0) {
+        pour_mille = 0;
+    } else if (pour_mille > 1000) {
+        pour_mille = 1000;
+    }
+    const uint32_t plein = (uint32_t)r->w * (uint32_t)pour_mille / 1000u;
+    xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
+    remplir(r->x, r->y, plein, r->h, s_couleurs[couleur]);
+    remplir(r->x + plein, r->y, r->w - plein, r->h, s_couleurs[fond]);
+    if (repere_pour_mille >= 0 && repere_pour_mille <= 1000) {
+        uint32_t xr = (uint32_t)r->w * (uint32_t)repere_pour_mille / 1000u;
+        if (xr + 3 > r->w) {
+            xr = r->w > 3 ? r->w - 3u : 0;
+        }
+        remplir(r->x + xr, r->y, 3, r->h, s_couleurs[BANC_BLANC]);
+    }
+    publier(r->y, (uint32_t)r->y + r->h);
+    xSemaphoreGive(s_ec.mutex);
+}
+
+void banc_ecran_disque(uint16_t cx, uint16_t cy, uint16_t rayon, banc_couleur_t couleur)
+{
+    if (!s_ec.ok || couleur >= BANC_NB_COULEURS || cx < rayon || cy < rayon) {
+        return;
+    }
+    const int32_t r2 = (int32_t)rayon * rayon;
+    xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
+    for (int32_t dy = -(int32_t)rayon; dy <= (int32_t)rayon; dy++) {
+        int32_t dx = 0;
+        while ((dx + 1) * (dx + 1) + dy * dy <= r2) {
+            dx++;
+        }
+        remplir((uint32_t)(cx - dx), (uint32_t)(cy + dy), (uint32_t)(2 * dx + 1), 1, s_couleurs[couleur]);
+    }
+    publier((uint32_t)(cy - rayon), (uint32_t)(cy + rayon + 1));
     xSemaphoreGive(s_ec.mutex);
 }
 
@@ -532,7 +730,7 @@ void banc_ecran_message_vue(banc_couleur_t couleur, const char *texte)
 
 void banc_ecran_ligne(banc_ligne_t ligne, banc_couleur_t couleur, const char *fmt, ...)
 {
-    if (!s_ec.ok || ligne >= BANC_NB_LIGNES) {
+    if (ligne >= BANC_NB_LIGNES || couleur >= BANC_NB_COULEURS) {
         return;
     }
     char texte[TEXTE_MAX];
@@ -540,15 +738,25 @@ void banc_ecran_ligne(banc_ligne_t ligne, banc_couleur_t couleur, const char *fm
     va_start(ap, fmt);
     vsnprintf(texte, sizeof(texte), fmt, ap);
     va_end(ap);
+    banc_bandeau_noter(ligne, couleur, texte);     /* copie pour la page web, écran ou non */
+    if (!s_ec.ok) {
+        return;
+    }
 
-    const uint16_t y = (uint16_t)(s_ec.bandeau_y + SEPARATION_H + 4 + ligne * LIGNE_H);
+    const banc_rect_t *b = &s_ec.zones.bandeau;
+    const uint32_t y = b->y + SEPARATION_H + 4u + (uint32_t)ligne * LIGNE_H;
+    const uint16_t fond = s_couleurs[BANC_FOND];
     xSemaphoreTake(s_ec.mutex, portMAX_DELAY);
-    dessiner_texte(MARGE_X, y, texte, s_couleurs[couleur], FOND_BANDEAU, (uint16_t)(s_ec.w - MARGE_X), ECHELLE_TEXTE);
-    publier(y, (uint16_t)(y + CAR_H(ECHELLE_TEXTE)));
+    remplir(0, y, s_ec.w, CAR_H(ECHELLE_TEXTE), fond);
+    dessiner_ligne(MARGE_X, y, texte, s_couleurs[couleur], fond, (uint32_t)s_ec.w - MARGE_X, y + CAR_H(ECHELLE_TEXTE),
+                   ECHELLE_TEXTE);
+    publier(y, y + CAR_H(ECHELLE_TEXTE));
     xSemaphoreGive(s_ec.mutex);
 }
 
 #else /* CONFIG_BANC_ECRAN_AUCUN */
+
+static const banc_zones_t s_zones_vides;
 
 esp_err_t banc_ecran_init(void)
 {
@@ -560,9 +768,28 @@ bool banc_ecran_ok(void)
     return false;
 }
 
+void banc_ecran_couper(void)
+{
+}
+
 const char *banc_ecran_nom(void)
 {
     return "aucun";
+}
+
+const banc_zones_t *banc_ecran_zones(void)
+{
+    return &s_zones_vides;
+}
+
+uint16_t banc_ecran_car_l(int echelle)
+{
+    return (uint16_t)(6 * echelle);
+}
+
+uint16_t banc_ecran_car_h(int echelle)
+{
+    return (uint16_t)(9 * echelle);
 }
 
 void banc_ecran_image(const nid_capture_frame_t *f)
@@ -572,15 +799,56 @@ void banc_ecran_image(const nid_capture_frame_t *f)
 
 void banc_ecran_ligne(banc_ligne_t ligne, banc_couleur_t couleur, const char *fmt, ...)
 {
-    (void)ligne;
-    (void)couleur;
-    (void)fmt;
+    if (ligne >= BANC_NB_LIGNES || couleur >= BANC_NB_COULEURS) {
+        return;
+    }
+    char texte[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(texte, sizeof(texte), fmt, ap);
+    va_end(ap);
+    banc_bandeau_noter(ligne, couleur, texte);     /* copie pour la page web */
 }
 
 void banc_ecran_message_vue(banc_couleur_t couleur, const char *texte)
 {
     (void)couleur;
     (void)texte;
+}
+
+void banc_ecran_rect(const banc_rect_t *r, banc_couleur_t couleur)
+{
+    (void)r;
+    (void)couleur;
+}
+
+void banc_ecran_texte(const banc_rect_t *r, int echelle, banc_couleur_t encre, banc_couleur_t fond, bool centre,
+                      const char *texte)
+{
+    (void)r;
+    (void)echelle;
+    (void)encre;
+    (void)fond;
+    (void)centre;
+    (void)texte;
+}
+
+void banc_ecran_barre(const banc_rect_t *r, int pour_mille, int repere_pour_mille, banc_couleur_t couleur,
+                      banc_couleur_t fond)
+{
+    (void)r;
+    (void)pour_mille;
+    (void)repere_pour_mille;
+    (void)couleur;
+    (void)fond;
+}
+
+void banc_ecran_disque(uint16_t cx, uint16_t cy, uint16_t rayon, banc_couleur_t couleur)
+{
+    (void)cx;
+    (void)cy;
+    (void)rayon;
+    (void)couleur;
 }
 
 #endif /* CONFIG_BANC_ECRAN_AUCUN */

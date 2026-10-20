@@ -256,6 +256,8 @@ static adc_cali_handle_t s_adc_cali;
 static adc_unit_t s_adc_unit;
 static adc_channel_t s_adc_chan;
 static volatile bool s_batt_ready;
+static volatile uint32_t s_last_raw_mv;     /* dernière tension calculée, même invraisemblable (banc d'essai) */
+static bool s_implausible_logged;
 
 static esp_err_t battery_cali_create(void)
 {
@@ -389,14 +391,38 @@ esp_err_t nid_power_battery_read_mv(uint32_t *mv)
     if (adc_mv < 0) {
         adc_mv = 0;
     }
-    *mv = (uint32_t)(((uint64_t)adc_mv * CONFIG_NID_BATT_DIVIDER_X1000 + 500) / 1000);
+    const uint32_t batt_mv = (uint32_t)(((uint64_t)adc_mv * CONFIG_NID_BATT_DIVIDER_X1000 + 500) / 1000);
+    s_last_raw_mv = batt_mv;
+    if (!nid_power_battery_plausible(batt_mv)) {
+        /* Pont diviseur absent (broche flottante, ~2 V lus sur la carte de développement)
+         * ou mal câblé : mesure absente, jamais un arrêt sur « batterie critique ». */
+        if (!s_implausible_logged) {
+            s_implausible_logged = true;
+            ESP_LOGW(TAG, "tension batterie invraisemblable (%" PRIu32 " mV après pont, plage %d à %d mV) : "
+                     "mesure ignorée (pont diviseur non câblé ?)", batt_mv, NID_BATT_PLAUSIBLE_MIN_MV,
+                     NID_BATT_PLAUSIBLE_MAX_MV);
+        }
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    s_implausible_logged = false;
+    *mv = batt_mv;
     return ESP_OK;
+}
+
+bool nid_power_battery_plausible(uint32_t mv)
+{
+    return mv >= NID_BATT_PLAUSIBLE_MIN_MV && mv <= NID_BATT_PLAUSIBLE_MAX_MV;
+}
+
+uint32_t nid_power_battery_last_raw_mv(void)
+{
+    return s_last_raw_mv;
 }
 
 nid_batt_level_t nid_power_battery_level(uint32_t mv, uint32_t low_mv, uint32_t critical_mv)
 {
-    if (mv == 0) {
-        return NID_BATT_UNKNOWN;
+    if (!nid_power_battery_plausible(mv)) {
+        return NID_BATT_UNKNOWN;    /* 0 (pas de mesure) ou tension invraisemblable */
     }
     if (mv < critical_mv) {
         return NID_BATT_CRITICAL;
