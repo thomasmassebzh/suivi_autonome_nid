@@ -1,0 +1,6 @@
+## esp_audio_codec pour ESP32-P4 rév. 1.x (Waveshare ESP32-P4NRW32) : les
+## versions 2.6 et suivantes exigent une puce rév. ≥ 3.0.
+dependencies:
+  espressif/esp_audio_codec:
+    version: ">=2.4,<2.6"
+    require: public

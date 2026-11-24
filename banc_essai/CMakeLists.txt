@@ -20,6 +20,8 @@ get_filename_component(NID_COMPOSANTS "${CMAKE_CURRENT_LIST_DIR}/../firmware/com
 foreach(composant ${BANC_COMPOSANTS_FIRMWARE})
     list(APPEND EXTRA_COMPONENT_DIRS "${NID_COMPOSANTS}/${composant}")
 endforeach()
+# esp_audio_codec selon la révision de la puce (composant nid_codec_audio du firmware).
+include("${CMAKE_CURRENT_LIST_DIR}/../firmware/codec_audio/codec_audio.cmake")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
