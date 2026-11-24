@@ -6,5 +6,13 @@ dependencies:
   espressif/esp_cam_sensor: "2.6.0"
   espressif/esp_h264: "1.4.1"
   espressif/esp_muxer: "1.2.3"
-  espressif/esp_audio_codec: "~2.6.2"
+  # esp_audio_codec 2.6 et plus exige une puce rév. ≥ 3.0 (P4X) ; pour une puce
+  # rév. 1.x (Waveshare ESP32-P4NRW32, sdkconfig.defaults.rev1) : version 2.4 / 2.5.
+  espressif/esp_audio_codec:
+    version: "~2.6.2"
+    matches:
+      - if: "$CONFIG{ESP32P4_SELECTS_REV_LESS_V3} == True"
+        version: ">=2.4,<2.6"
+      - if: "$CONFIG{ESP32P4_SELECTS_REV_LESS_V3} != True"
+        version: "~2.6.2"
   espressif/esp_codec_dev: "^1.6.0"
