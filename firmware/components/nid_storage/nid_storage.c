@@ -252,8 +252,8 @@ static void log_partitions(sdmmc_card_t *card)
     heap_caps_free(s0);
 }
 
-/** Monte la carte (verrou fichiers pris, aucun support monté). */
-static esp_err_t mount_card(void)
+/** Monte la carte (verrou fichiers pris, aucun support monté). Inutilisée en mode « clé USB » seul. */
+__attribute__((unused)) static esp_err_t mount_card(void)
 {
     const nid_board_pins_t *pins = nid_board_pins();
 

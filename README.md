@@ -198,7 +198,7 @@ idf.py -B build_waveshare -p COM5 flash monitor
 | Fichier | Effet |
 |---|---|
 | `sdkconfig.defaults.waveshare` | brochage Waveshare (SD alimentée par GPIO45, pas d'écran ni de voyant) |
-| `sdkconfig.defaults.rev1` | puce ESP32-P4 rév. 1.x (ESP32-P4NRW32) ; `esp_audio_codec` 2.4/2.5 au lieu de 2.6 |
+| `sdkconfig.defaults.rev1` | puce ESP32-P4 rév. 1.x (ESP32-P4NRW32) ; `esp_audio_codec` 2.4/2.5 au lieu de 2.6, choisi par `firmware/codec_audio/codec_audio.cmake` (nom de ce fichier, `-D NID_PUCE_REV1=1` ou `sdkconfig`) |
 | `sdkconfig.defaults.vbat` | pile RTC **rechargeable** en place : l'heure survit à un échange de batterie |
 | `sdkconfig.defaults.usb` | stockage sur clé / disque USB au lieu de la carte microSD |
 
