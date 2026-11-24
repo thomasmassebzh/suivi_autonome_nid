@@ -409,8 +409,14 @@ static esp_err_t status_get(httpd_req_t *req)
               json_bool(sh.sd_mounted), sh.sd_total, sh.sd_free);
     sb_printf(&b, ",\"camera\":");
     sb_json_str(&b, nid_capture_sensor_name());
+    sb_printf(&b, ",\"support\":");
+    sb_json_str(&b, nid_storage_medium_str());
     sb_printf(&b, ",\"camera_prete\":%s,\"rtc\":", json_bool(nid_capture_is_ready()));
     sb_json_str(&b, nid_clock_model_str());
+    nid_clock_info_t ck;
+    nid_clock_get_info(&ck);
+    sb_printf(&b, ",\"pile_rtc\":%s,\"derive_ppb\":%" PRId32 ",\"mesures_derive\":%" PRIu32 ",\"ecart_max_s\":%" PRIu32,
+              json_bool(ck.vbat), ck.correction_ppb, ck.measurements, ck.max_error_s);
     if (sh.temp_ok) {
         int t10 = (int)(sh.temp_c * 10.0f + (sh.temp_c >= 0.0f ? 0.5f : -0.5f));
         int a10 = t10 < 0 ? -t10 : t10;
@@ -627,7 +633,17 @@ static esp_err_t time_post(httpd_req_t *req)
         return send_result(req, HTTP_400, false, "Heure du téléphone invalide.");
     }
 
-    esp_err_t err = nid_clock_set_time((time_t)epoch);
+    /* Heure du téléphone à la milliseconde si fournie (mesure de la dérive de la carte). */
+    char ms_val[24] = "";
+    long long epoch_ms = epoch * 1000LL;
+    if (form_value(req, "epoch_ms", ms_val, sizeof(ms_val))) {
+        char *ms_end = NULL;
+        long long v = strtoll(ms_val, &ms_end, 10);
+        if (ms_end != ms_val && v / 1000LL >= epoch - 2 && v / 1000LL <= epoch + 2) {
+            epoch_ms = v;
+        }
+    }
+    esp_err_t err = nid_clock_set_time_ms((int64_t)epoch_ms);
     long long diff = (long long)time(NULL) - epoch;
     bool system_ok = diff >= -5 && diff <= 5;
     if (system_ok) {

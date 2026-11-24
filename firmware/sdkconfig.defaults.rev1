@@ -1,0 +1,6 @@
+# ESP32-P4 en révision 1.x (cartes Waveshare livrées avec l'ESP32-P4NRW32, sans « X »).
+# Vérifier avec « esptool chip-id » : rév. v1.3 → ajouter ce fichier ; rév. ≥ v3.0 → ne pas l'ajouter.
+# Les binaires rév. 1.x et 3.x ne sont pas compatibles.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+# CONFIG_ESP32P4_REV_MIN_301 is not set

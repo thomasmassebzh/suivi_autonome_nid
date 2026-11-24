@@ -1,9 +1,10 @@
 /*
  * nid_capture — calculs purs (sans matériel), testés sur PC (test_host/)
  *
- *  - AudioSpecificConfig AAC (ISO/IEC 14496-3, § 1.6.2.1) déclarée au MP4 ;
- *  - repérage d'un en-tête ADTS en tête d'une trame AAC (à retirer : le MP4
- *    attend des trames brutes) ;
+ *  - AudioSpecificConfig AAC (ISO/IEC 14496-3, § 1.6.2.1) ;
+ *  - en-tête ADTS d'une trame AAC (ISO/IEC 13818-7, § 6.2) : repérage et
+ *    construction. Les trames sont remises au multiplexeur MP4 avec leur
+ *    en-tête ADTS, comme le fait esp_capture d'Espressif ;
  *  - créneaux d'horodatage des images vidéo (images perdues, PTS).
  */
 #pragma once
@@ -70,6 +71,47 @@ static inline size_t nid_aac_adts_header_len(const uint8_t *d, size_t len)
         return 0;   /* incohérent : pas un en-tête ADTS */
     }
     return hdr;
+}
+
+#define NID_AAC_ADTS_LEN        7u      /* en-tête ADTS sans CRC */
+
+/**
+ * Construit un en-tête ADTS de 7 octets (MPEG-4, AAC-LC, sans CRC) pour une
+ * trame brute de payload_len octets. Le champ frame_length inclut l'en-tête.
+ * @return false si la fréquence est hors table, le nombre de voies hors 1..7
+ *         ou la trame trop longue (13 bits).
+ */
+static inline bool nid_aac_adts_build(uint32_t sample_rate, uint8_t channels, size_t payload_len,
+                                      uint8_t out[NID_AAC_ADTS_LEN])
+{
+    const int fi = nid_aac_freq_index(sample_rate);
+    const size_t frame_len = payload_len + NID_AAC_ADTS_LEN;
+    if (fi < 0 || channels < 1 || channels > 7 || frame_len > 0x1FFF || out == NULL) {
+        return false;
+    }
+    const uint8_t profile = (uint8_t)(NID_AAC_OBJECT_LC - 1u);    /* 1 = LC */
+    out[0] = 0xFF;                                                  /* synchro 0xFFF */
+    out[1] = 0xF1;                                                  /* MPEG-4, couche 0, sans CRC */
+    out[2] = (uint8_t)((profile << 6) | ((uint8_t)fi << 2) | (channels >> 2));
+    out[3] = (uint8_t)(((channels & 0x3u) << 6) | ((frame_len >> 11) & 0x3u));
+    out[4] = (uint8_t)((frame_len >> 3) & 0xFFu);
+    out[5] = (uint8_t)(((frame_len & 0x7u) << 5) | 0x1Fu);          /* remplissage du tampon : 0x7FF (VBR) */
+    out[6] = 0xFC;                                                  /* une seule trame brute */
+    return true;
+}
+
+/**
+ * Horodatage (ms) de la trame AAC n° index, relatif à la première trame :
+ * index × échantillons par trame / fréquence, arrondi à la ms inférieure.
+ * Calculé sur le nombre de trames et non sur l'horloge : jamais de trou ni
+ * de doublon, même si la tâche son a été retardée.
+ */
+static inline uint32_t nid_aac_frame_pts_ms(uint32_t index, uint32_t samples_per_frame, uint32_t sample_rate)
+{
+    if (sample_rate == 0) {
+        return 0;
+    }
+    return (uint32_t)(((uint64_t)index * samples_per_frame * 1000u) / sample_rate);
 }
 
 /** Pas de borne de libération connue (voir nid_capture_next_slot). */

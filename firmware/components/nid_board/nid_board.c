@@ -73,6 +73,8 @@ static const nid_board_pins_t s_pins = {
     .sd_d1 = PIN_OR_NC(CONFIG_NID_PIN_SD_D1),
     .sd_d2 = PIN_OR_NC(CONFIG_NID_PIN_SD_D2),
     .sd_d3 = PIN_OR_NC(CONFIG_NID_PIN_SD_D3),
+    .sd_power = PIN_OR_NC(CONFIG_NID_PIN_SD_POWER),
+    .usb_vbus = PIN_OR_NC(CONFIG_NID_PIN_USB_VBUS_EN),
 };
 
 static i2c_master_bus_handle_t s_i2c_bus;
@@ -92,6 +94,23 @@ static bool is_wake_input(gpio_num_t pin)
 static int led_level(bool on)
 {
     return (on == s_pins.status_led_active_high) ? 1 : 0;
+}
+
+#if CONFIG_NID_PIN_SD_POWER >= 0 && CONFIG_NID_SD_POWER_ACTIVE_LOW
+#define SD_POWER_ON_LEVEL 0
+#else
+#define SD_POWER_ON_LEVEL 1
+#endif
+
+#if CONFIG_NID_PIN_USB_VBUS_EN >= 0 && !CONFIG_NID_USB_VBUS_ACTIVE_HIGH
+#define USB_VBUS_ON_LEVEL 0
+#else
+#define USB_VBUS_ON_LEVEL 1
+#endif
+
+const char *nid_board_name(void)
+{
+    return CONFIG_NID_BOARD_NAME;
 }
 
 /*
@@ -143,6 +162,9 @@ esp_err_t nid_board_init_early(void)
     park_output(s_pins.c6_reset, 0);
     /* Interrupteur d'alimentation : OFF inactif (niveau bas = pas de coupure). */
     park_output(s_pins.power_off, 0);
+    /* Supports de stockage hors tension jusqu'à leur montage (nid_storage). */
+    park_output(s_pins.sd_power, !SD_POWER_ON_LEVEL);
+    park_output(s_pins.usb_vbus, !USB_VBUS_ON_LEVEL);
     /* Entrées de réveil maintenues avant la veille (configurées ensuite par nid_detect). */
     const gpio_num_t inputs[] = { s_pins.pir, s_pins.button, s_pins.rtc_int };
     for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
@@ -217,6 +239,26 @@ void nid_board_status_blink(int count, int on_ms, int off_ms)
     }
 }
 
+bool nid_board_sd_power(bool on)
+{
+    if (s_pins.sd_power == GPIO_NUM_NC || is_wake_input(s_pins.sd_power)) {
+        return false;
+    }
+    drive_output(s_pins.sd_power, on ? SD_POWER_ON_LEVEL : !SD_POWER_ON_LEVEL);
+    gpio_hold_dis(s_pins.sd_power);
+    return true;
+}
+
+bool nid_board_usb_vbus(bool on)
+{
+    if (s_pins.usb_vbus == GPIO_NUM_NC || is_wake_input(s_pins.usb_vbus)) {
+        return false;
+    }
+    drive_output(s_pins.usb_vbus, on ? USB_VBUS_ON_LEVEL : !USB_VBUS_ON_LEVEL);
+    gpio_hold_dis(s_pins.usb_vbus);
+    return true;
+}
+
 void nid_board_prepare_deep_sleep(void)
 {
     /* Sorties au repos et maintenues pendant la veille (maintien individuel des
@@ -227,4 +269,6 @@ void nid_board_prepare_deep_sleep(void)
     hold_output(s_pins.audio_pa, 0);
     hold_output(s_pins.c6_reset, 0);
     hold_output(s_pins.power_off, 0);
+    hold_output(s_pins.sd_power, !SD_POWER_ON_LEVEL);
+    hold_output(s_pins.usb_vbus, !USB_VBUS_ON_LEVEL);
 }

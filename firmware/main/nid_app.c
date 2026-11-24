@@ -355,9 +355,10 @@ static void record_sequences(bool night)
             err = nid_storage_media_commit(&f);
         }
         if (err == ESP_OK) {
-            nid_storage_journal("video", "%s;%" PRIu32 " ms;%" PRIu32 " images;%" PRIu32 " perdues;%s;image 1 à %" PRIu32 " ms du réveil",
-                                f.name, stats.duration_ms, stats.video_frames, stats.dropped_frames,
-                                night ? "nuit" : "jour", stats.first_frame_ms);
+            nid_storage_journal("video", "%s;%" PRIu32 " ms;%" PRIu32 " images;%" PRIu32 " perdues;%" PRIu32 " trames son;%s;"
+                                "image 1 à %" PRIu32 " ms du réveil;tampon max %" PRIu32 " ko, attente %" PRIu32 " ms",
+                                f.name, stats.duration_ms, stats.video_frames, stats.dropped_frames, stats.audio_frames,
+                                night ? "nuit" : "jour", stats.first_frame_ms, stats.write_peak_kb, stats.write_stall_ms);
         } else {
             nid_storage_media_abort(&f, true);
             nid_storage_journal("erreur", "vidéo %s : %s", f.name, esp_err_to_name(err));
@@ -584,7 +585,10 @@ static void run_installation(bool from_power_on)
     if (ctx.time_changed) {
         char buf[32];
         nid_clock_format_local((time_t)now_utc(), "%Y-%m-%d %H:%M:%S", buf, sizeof(buf));
-        nid_storage_journal("heure_reglee", "%s (depuis le téléphone)", buf);
+        nid_clock_info_t ck;
+        nid_clock_get_info(&ck);
+        nid_storage_journal("heure_reglee", "%s (depuis le téléphone) ; dérive corrigée %+.1f ppm (%" PRIu32 " mesure(s))",
+                            buf, (double)ck.correction_ppb / 1000.0, ck.measurements);
     }
     if (ctx.config_changed) {
         nid_config_validate(&st->cfg);
@@ -632,11 +636,14 @@ static void log_startup(const nid_boot_info_t *boot, bool rtc_valid, int recover
     esp_chip_info(&chip);
     uint64_t total = 0, free_b = 0;
     nid_storage_get_space(&total, &free_b);
-    nid_storage_journal("demarrage", "firmware %s;puce rév. %d.%d;%s;horloge %s%s;SD %" PRIu64 "/%" PRIu64 " Mo libres",
-                        fw_version(), chip.revision / 100, chip.revision % 100,
-                        reset_reason_str(boot->reset_reason), nid_clock_model_str(),
-                        rtc_valid ? "" : " (heure perdue)",
-                        free_b / (1024 * 1024), total / (1024 * 1024));
+    nid_clock_info_t ck;
+    nid_clock_get_info(&ck);
+    nid_storage_journal("demarrage", "firmware %s;%s, puce rév. %d.%d;%s;horloge %s%s%s, dérive corrigée %+.1f ppm;"
+                        "%s %" PRIu64 "/%" PRIu64 " Mo libres",
+                        fw_version(), nid_board_name(), chip.revision / 100, chip.revision % 100,
+                        reset_reason_str(boot->reset_reason), nid_clock_model_str(), ck.vbat ? " avec pile" : "",
+                        rtc_valid ? "" : " (heure perdue)", (double)ck.correction_ppb / 1000.0,
+                        nid_storage_medium_str(), free_b / 1000000ULL, total / 1000000ULL);
     if (recovered > 0) {
         nid_storage_journal("fichiers_incomplets", "%d fichier(s) interrompu(s) renommé(s) en _INCOMPLET", recovered);
     }

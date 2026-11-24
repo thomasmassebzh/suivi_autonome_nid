@@ -27,13 +27,17 @@ versions figées des composants). Modules :
 | `nid_ir` | fait : LED 940 nm, filtre IR-cut, lever/coucher du soleil, avec tests sur PC (`make -C firmware/components/nid_ir/test_host`) |
 | `nid_install` | fait : Wi-Fi via le C6, page web (aperçu, réglages, heure, maintenance) — à valider sur la carte |
 | `nid_wifi` | fait : démarrage du C6 (ESP-Hosted), point d'accès ou station, arrêt propre ; commun à `nid_install` et au banc d'essai — à valider sur la carte |
-| `nid_capture` | fait, d'après les exemples Espressif (`esp_video` sd_card, `esp_muxer` video_muxer) : OV5647 / SC2336 détectées, date/heure incrustée, H.264 matériel + son AAC (ES8311) en MP4, photo et aperçu JPEG, mode nuit monochrome — **à valider sur la carte** (recadrages ISP, lecture des MP4, synchro son/image) |
-| `nid_storage` | fait : montage de la carte SD (LDO interne), nommage, écriture sécurisée `.tmp` → nom final, récupération `_INCOMPLET`, journal CSV |
-| `nid_clock` | **à faire** : pilote DS3231/DS1307 (interface définie, fonctions provisoires) |
+| `nid_capture` | fait, d'après les exemples Espressif (`esp_video` sd_card, `esp_muxer` video_muxer, `esp_capture`) : OV5647 / SC2336 détectées, date/heure incrustée, H.264 matériel + son AAC (ES8311, trames ADTS comme `esp_capture`) en MP4, photo et aperçu JPEG, mode nuit monochrome — **à valider sur la carte** (son, images perdues, recadrages ISP) |
+| `nid_writer` | fait : écriture asynchrone du MP4 (tampon de 4 Mo en PSRAM, tâche dédiée) : la caméra n'attend plus le support ; tests sur PC du tampon circulaire |
+| `nid_storage` | fait : carte microSD (LDO interne, interrupteur GPIO45 sur la Waveshare) **ou clé / disque USB** (`usb_host_msc`, 5 V USB commandé), nommage, écriture sécurisée `.tmp` → nom final, récupération `_INCOMPLET`, journal CSV, diagnostic des partitions — clé USB **à valider sur la carte** |
+| `nid_clock` | fait : horloge interne de l'ESP32-P4 (quartz 32 kHz ou RC détecté), dérive mesurée à chaque mise à l'heure et compensée à chaque réveil, pile VBAT facultative (Waveshare) ; tests sur PC. Pilote DS3231 non écrit (inutile avec la correction de dérive) |
 
-Rien n'a encore été essayé sur la carte : seule la compilation est vérifiée. Tant que `nid_clock`
-n'est pas fait, l'heure n'est pas conservée en cas de coupure d'alimentation (elle se règle
-depuis la page web d'installation).
+Correctifs des essais du 14/10 (à revérifier au banc, ligne `BILAN`) : son absent (trames AAC
+désormais avec en-tête ADTS, piste son déclarée comme dans `esp_capture`), images perdues à
+1080p30 (écriture asynchrone : champs `tampon_max`, `attente`, `ecriture_max` du bilan), fichiers
+datés 1969 (heure réglée automatiquement à l'ouverture de la page ; sans heure, noms `SANSHEURE`),
+« 42 Mo libres » sur une carte de 120 Go (partition FAT de 42 Mo d'une carte de Raspberry Pi : le
+moniteur série affiche désormais la table de partitions ; reformater en une seule partition FAT32).
 
 **Premiers essais sur la carte** : suivre le guide pas à pas [docs/essais_sur_carte.md](docs/essais_sur_carte.md)
 (exemples Espressif d'abord, puis le [banc d'essai](banc_essai/README.md) : vidéo sur appui du bouton
@@ -56,7 +60,8 @@ BOOT, avec l'écran 7" de la carte pour le contrôle).
 | Caméra cible | Waveshare RPi IR-CUT Camera (**OV5647**, IR-cut) — équivalent Arducam B0151 | prise de vue jour/nuit |
 | Caméra de banc | caméra 2 MP du kit (**SC2336**, sans IR) | essais sur table |
 | Détecteur | **HC-SR501** (PIR) — cible : Panasonic EKMB1109111 | réveil sur passage |
-| Horloge | **DS3231** recommandé (le DS1307 de l'inventaire fonctionne en 5 V) | heure exacte, dérive ≤ 1 min / 14 j |
+| Horloge | horloge interne de l'ESP32-P4 + quartz 32 kHz de la carte (dérive mesurée et compensée) ; pile RTC rechargeable sur la Waveshare (facultative) | heure exacte, dérive ≤ 1 min / 14 j |
+| Stockage déporté (option) | clé ou disque USB 2.0, câble ≤ 5 m, interrupteur sur le 5 V USB | relève au pied de l'arbre |
 | Éclairage | 3 LED **940 nm** + MOSFET | nuit, invisible pour la faune |
 | Stockage | microSD endurance, **FAT32** | vidéos, photos, journal, réglages |
 | Carte secondaire | Waveshare ESP32-P4-WIFI6 | voir [Dépannage](#dépannage) (révision de puce) |
@@ -118,7 +123,8 @@ et navigation dans le code C). Ce dossier est propre à chaque poste et n'est pa
      profonde ou coupure matérielle Pololu), délai du chien de garde ;
    - **Suivi nid — Carte et brochage** : GPIO du PIR, du bouton, des LED IR, du filtre IR-cut,
      de la mesure batterie… (voir [Câblage](#câblage-par-défaut)) ;
-   - **Suivi nid — Horloge temps réel** : DS3231, DS1307 ou détection automatique.
+   - **Suivi nid — Stockage** : carte microSD, clé USB, ou clé USB si présente sinon carte SD ;
+   - **Suivi nid — Écriture asynchrone (vidéo)** : taille du tampon en PSRAM (4 Mo par défaut).
 
    Cliquer sur **Save** puis fermer l'éditeur.
 
@@ -174,6 +180,48 @@ En mode terrain, la liaison USB est coupée à chaque mise en veille : pour la m
 mode **Banc d'essai** (menu *Suivi nid — Application*), ou lire la console sur l'UART0 du connecteur
 J1 (TX = GPIO37 broche 8, RX = GPIO38 broche 10, GND broche 9) avec un adaptateur USB-série 3,3 V,
 qui reste connecté pendant la veille.
+
+## Carte Waveshare (version client) et variantes
+
+Le brochage de la carte Waveshare ESP32-P4-WIFI6 (et des cartes Waveshare P4 + C6 au même
+brochage) est choisi par `sdkconfig.defaults.waveshare`, ajouté après `sdkconfig.defaults` dans un
+dossier de compilation séparé :
+
+```bash
+cd firmware
+esptool chip-id                  # révision de la puce : v1.x → ajouter sdkconfig.defaults.rev1
+idf.py -B build_waveshare -D SDKCONFIG=build_waveshare/sdkconfig \
+       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.waveshare;sdkconfig.defaults.rev1" build
+idf.py -B build_waveshare -p COM5 flash monitor
+```
+
+| Fichier | Effet |
+|---|---|
+| `sdkconfig.defaults.waveshare` | brochage Waveshare (SD alimentée par GPIO45, pas d'écran ni de voyant) |
+| `sdkconfig.defaults.rev1` | puce ESP32-P4 rév. 1.x (ESP32-P4NRW32) ; `esp_audio_codec` 2.4/2.5 au lieu de 2.6, choisi par `firmware/codec_audio/codec_audio.cmake` (nom de ce fichier, `-D NID_PUCE_REV1=1` ou `sdkconfig`) |
+| `sdkconfig.defaults.vbat` | pile RTC **rechargeable** en place : l'heure survit à un échange de batterie |
+| `sdkconfig.defaults.usb` | stockage sur clé / disque USB au lieu de la carte microSD |
+
+Le brochage de terrain (PIR, bouton, LED IR, mesure batterie) garde les numéros de la P4X : à
+vérifier sur le connecteur 40 broches de la Waveshare (menu *Carte et brochage*).
+
+### Stockage USB
+
+La clé est montée sous `/sdcard` comme la carte : rien ne change pour le reste du firmware.
+Câble USB 2.0 de 5 m au plus. Prévoir un interrupteur de charge (TPS2051, AP2553…) sur le 5 V USB
+et renseigner sa broche (*Interrupteur du 5 V USB*) : la clé n'est alors alimentée que pendant
+l'enregistrement (une clé consomme 20 à 100 mA au repos). Le montage prend 0,3 à 1 s ; le tampon
+d'écriture en PSRAM absorbe les ralentissements de la clé.
+
+### Horloge sans module externe
+
+L'heure est tenue par le compteur basse consommation de l'ESP32-P4 pendant la veille. À chaque
+ouverture de la page d'installation, le boîtier prend l'heure du téléphone (à la milliseconde) si
+elle diffère de plus de 2 s ; si la mise à l'heure précédente date d'au moins 24 h, l'écart constaté
+donne la dérive propre de la carte, enregistrée et compensée ensuite à chaque réveil (simulation :
+28 s d'écart sur 14 jours sans correction, moins d'1 s avec). Sans pile RTC, une coupure
+d'alimentation fait perdre l'heure : les fichiers sont alors nommés `SANSHEURE` jusqu'à la
+prochaine mise à l'heure.
 
 ## Compiler et flasher en ligne de commande
 
@@ -300,7 +348,9 @@ marge (FP1.7 ; mesurer le débit réel sur les premières séquences).
 |---|---|
 | `Failed to resolve component` / échec de téléchargement à la compilation | pas d'accès au registre Espressif : vérifier la connexion (proxy), puis `ESP-IDF: Full Clean Project` et recompiler |
 | Erreur sur la révision de puce au flash | la puce est en rév. < 3.0 (cas possible de la carte Waveshare) : vérifier avec `esptool chip-id` ; pour une rév. 1.x, cocher *Select ESP32-P4 revisions <3.0* dans une configuration séparée ; ne jamais flasher avec `--force` |
-| « carte SD indisponible » dans le moniteur | carte absente, mal insérée ou non FAT32 ; le firmware ne formate jamais une carte |
+| « carte SD indisponible » dans le moniteur | carte absente, mal insérée ou non FAT32 (les cartes de 64 Go et plus sont livrées en exFAT) ; le firmware ne formate jamais une carte |
+| Espace libre très faible sur une grande carte (« 42 Mo ») | carte à plusieurs partitions (carte de Raspberry Pi) : le moniteur liste les partitions ; reformater en une seule partition FAT32 (*SD Card Formatter*) |
+| `aucune clé USB détectée` | clé non alimentée (interrupteur du 5 V USB), câble trop long ou de mauvaise qualité, ou clé lente : augmenter *Délai maximal de détection de la clé USB* |
 | Caméra non détectée | nappe à l'envers (contacts face aux contacts du connecteur, clapets verrouillés) ; le connecteur 15 points de la P4X suit le brochage Espressif : vérifier la correspondance avec la caméra Raspberry Pi avant de brancher ; OV5647 : vérifier la fréquence de l'oscillateur du module (24 ou 25 MHz) |
 | Vidéos qui s'arrêtent avant la durée prévue | batterie au seuil critique (voir journal) ou carte SD trop lente (utiliser une carte classe A1/V30) |
 | Le PIR déclenche sans raison | baisser la sensibilité (potentiomètre du HC-SR501 et `sensibilite` dans `config.ini`), écarter le PIR de l'antenne Wi-Fi et des LED IR ; les `fausse_detection` sont visibles dans le journal |
@@ -321,8 +371,9 @@ une interface documentée (`include/*.h`). La logique d'ensemble est dans `firmw
 | `nid_detect` | PIR (validation logicielle selon la sensibilité), bouton | FP1.1 |
 | `nid_capture` | caméra MIPI-CSI, ISP, H.264 matériel, MP4 + son AAC, photo JPEG, incrustation, aperçu | FP1.2, FP1.3, FP1.6, FP1.8, FS1.2 |
 | `nid_ir` | LED IR 940 nm, filtre IR-cut, décision jour/nuit (lever/coucher du soleil) | FP1.2, FC1.1 |
-| `nid_clock` | horloge DS3231/DS1307, heure système, fuseau | FP1.6 |
-| `nid_storage` | carte microSD, nommage, écriture sécurisée, journal | FP1.6, FP1.7 |
+| `nid_clock` | horloge interne, correction de dérive, heure système, fuseau | FP1.6 |
+| `nid_storage` | carte microSD ou clé USB, nommage, écriture sécurisée, journal | FP1.6, FP1.7 |
+| `nid_writer` | écriture asynchrone du MP4 (tampon PSRAM) | FP1.2, FP1.3, FP1.7 |
 | `nid_config` | lecture/écriture de `config.ini` | FS1.4 |
 | `nid_power` | causes de réveil, veille profonde, batterie, chien de garde | FC3.1 à FC3.4 |
 | `nid_install` | page web d'installation, aperçu MJPEG, réglages, maintenance | FS1.2 à FS1.4, FS2, FC1.6 |

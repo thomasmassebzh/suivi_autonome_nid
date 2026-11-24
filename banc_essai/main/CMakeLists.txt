@@ -18,7 +18,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS "${NID_CAPTURE_DIR}"
     REQUIRES nid_capture nid_config nid_storage nid_wifi
-    PRIV_REQUIRES nid_board nid_detect nid_ir nid_power
+    PRIV_REQUIRES nid_board nid_clock nid_detect nid_ir nid_power
                   esp_lcd esp_driver_ppa esp_driver_jpeg esp_driver_gpio esp_driver_i2c esp_driver_tsens
                   esp_hw_support esp_timer esp_system esp_app_format esp_http_server lwip console freertos vfs
                   nvs_flash

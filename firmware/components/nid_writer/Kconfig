@@ -1,0 +1,36 @@
+menu "Suivi nid — Écriture asynchrone (vidéo)"
+
+    config NID_WRITER_BUFFER_KB
+        int "Taille du tampon d'écriture en PSRAM (ko)"
+        range 256 16384
+        default 4096
+        help
+            Les données vidéo passent par ce tampon avant d'être écrites sur la
+            carte SD ou la clé USB par une tâche dédiée : la caméra n'attend plus
+            le support. 4096 ko ≈ 13 s de vidéo à 2,5 Mbit/s, ≈ 8 s à 4 Mbit/s ;
+            de quoi absorber les pauses d'une carte SD (nettoyage interne) et le
+            montage d'une clé USB. Le tampon n'est alloué que pendant un
+            enregistrement.
+
+    config NID_WRITER_STALL_TIMEOUT_MS
+        int "Attente maximale quand le tampon est plein (ms)"
+        range 500 60000
+        default 3000
+        help
+            Au-delà, la séquence est arrêtée (fichier fermé proprement) : le
+            support est plein, retiré ou durablement trop lent.
+
+    config NID_WRITER_TASK_PRIO
+        int "Priorité de la tâche d'écriture"
+        range 1 20
+        default 4
+
+    config NID_WRITER_TASK_CORE
+        int "Cœur de la tâche d'écriture (-1 = indifférent)"
+        range -1 1
+        default 1
+        help
+            Cœur 1 par défaut : la boucle caméra → encodeur tourne sur le cœur 0
+            (tâche principale).
+
+endmenu

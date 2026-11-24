@@ -10,11 +10,18 @@
  *    ouverture de l'encodeur AAC (esp_audio_enc), taille des trames et
  *    horodatage des trames ;
  *  - esp_muxer, examples/video_muxer (Apache-2.0) : gain d'entrée du micro.
+ *  - esp-gmf, esp_capture (capture_muxer.c, Apache-2.0) : trames AAC remises
+ *    au multiplexeur avec leur en-tête ADTS (réglage par défaut de l'encodeur),
+ *    piste son déclarée sans AudioSpecificConfig.
  * Modifications : réception seule, ampli du haut-parleur jamais piloté
  * (pa_pin = -1, FC1.2), lecture dans une tâche dédiée pendant la séquence,
- * AudioSpecificConfig calculée (nid_capture_calc.h) au lieu d'être lue dans
- * l'encodeur (esp_audio_codec 2.6.2 ne la fournit pas en AAC brut), en-tête
- * ADTS retiré s'il est présent, niveau du micro mémorisé pour le vumètre du banc.
+ * en-tête ADTS ajouté si l'encodeur n'en produit pas, horodatage calculé sur
+ * le nombre de trames (sans trou ni doublon), niveau du micro mémorisé pour le
+ * vumètre du banc.
+ *
+ * Historique : jusqu'au 14/10, trames AAC brutes et AudioSpecificConfig
+ * fournie au MP4 ; les fichiers du banc étaient sans son. On reprend la forme
+ * des MP4 d'esp_capture, qui ont leur son.
  */
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -77,8 +84,12 @@ static struct {
     uint32_t                      frames;
     nid_capture_audio_sink_t      sink;
     void                         *ctx;
-    uint8_t                       asc[NID_AAC_ASC_LEN];  /*!< AudioSpecificConfig déclarée au MP4 */
-    bool                          adts_warned;
+    uint8_t                      *out_frame;  /*!< sortie de l'encodeur, après NID_AAC_ADTS_LEN octets de marge */
+    uint32_t                      rate;
+    uint8_t                       channels;
+    uint32_t                      samples_per_frame;
+    uint32_t                      encoded;    /*!< trames AAC produites depuis la première image vidéo */
+    bool                          adts_added_warned;
 
     /* niveau du dernier bloc lu (vumètre du banc d'essai) */
     portMUX_TYPE                  level_mux;
@@ -285,24 +296,29 @@ bool nid_capture_audio_get_last_level(nid_capture_audio_level_t *out)
 }
 
 /**
- * Remet une trame AAC au multiplexeur : trame brute attendue par le MP4. Si
- * l'encodeur ajoute malgré tout un en-tête ADTS, il est retiré (signalé une fois).
+ * Remet une trame AAC au multiplexeur, avec son en-tête ADTS. Si l'encodeur
+ * n'en a pas produit, l'en-tête est construit dans la marge réservée devant la
+ * trame (signalé une fois).
  */
-static void deliver_frame(const uint8_t *data, uint32_t len, uint32_t pts_ms)
+static void deliver_frame(uint8_t *data, uint32_t len, uint32_t pts_ms)
 {
-    const size_t adts = nid_aac_adts_header_len(data, len);
-    if (adts > 0) {
-        if (!s_au.adts_warned) {
-            s_au.adts_warned = true;
-            ESP_LOGW(TAG, "trames AAC avec en-tête ADTS : en-têtes retirés pour le MP4");
+    if (len == 0) {
+        return;
+    }
+    if (nid_aac_adts_header_len(data, len) == 0) {
+        uint8_t *hdr = data - NID_AAC_ADTS_LEN;     /* marge réservée par nid_capture_audio_start() */
+        if (!nid_aac_adts_build(s_au.rate, s_au.channels, len, hdr)) {
+            return;
         }
-        data += adts;
-        len -= (uint32_t)adts;
+        if (!s_au.adts_added_warned) {
+            s_au.adts_added_warned = true;
+            ESP_LOGW(TAG, "trames AAC sans en-tête ADTS : en-têtes ajoutés pour le MP4");
+        }
+        data = hdr;
+        len += NID_AAC_ADTS_LEN;
     }
-    if (len > 0) {
-        s_au.sink(data, len, pts_ms, s_au.ctx);
-        s_au.frames++;
-    }
+    s_au.sink(data, len, pts_ms, s_au.ctx);
+    s_au.frames++;
 }
 
 static void audio_task(void *arg)
@@ -332,7 +348,7 @@ static void audio_task(void *arg)
             .len = (uint32_t)s_au.pcm_size,
         };
         esp_audio_enc_out_frame_t out_frame = {
-            .buffer = s_au.out,
+            .buffer = s_au.out_frame,
             .len = (uint32_t)s_au.out_size,
         };
         if (esp_audio_enc_process(s_au.enc, &in_frame, &out_frame) != ESP_AUDIO_ERR_OK) {
@@ -347,7 +363,10 @@ static void audio_task(void *arg)
             have_base = true;
         }
         if (out_frame.encoded_bytes > 0) {
-            deliver_frame(out_frame.buffer, out_frame.encoded_bytes, (uint32_t)(base_ms + (int64_t)out_frame.pts));
+            /* Horodatage sur le compte des trames : 64 ms par trame à 16 kHz, sans dérive. */
+            const uint32_t pts = (uint32_t)base_ms + nid_aac_frame_pts_ms(s_au.encoded, s_au.samples_per_frame, s_au.rate);
+            s_au.encoded++;
+            deliver_frame(out_frame.buffer, out_frame.encoded_bytes, pts);
         }
     }
     xSemaphoreGive(s_au.done);
@@ -368,6 +387,7 @@ static void release_session(void)
     s_au.pcm = NULL;
     heap_caps_free(s_au.out);
     s_au.out = NULL;
+    s_au.out_frame = NULL;
 }
 
 esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_capture_audio_info_t *info)
@@ -376,15 +396,14 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
     ESP_RETURN_ON_FALSE(sink != NULL && info != NULL, ESP_ERR_INVALID_ARG, TAG, "paramètres absents");
     ESP_RETURN_ON_FALSE(s_au.task == NULL, ESP_ERR_INVALID_STATE, TAG, "séquence audio déjà en cours");
 
-    /* Encodeur AAC brut (sans ADTS) ; l'AudioSpecificConfig déclarée au MP4 est construite ici
-     * à partir des paramètres réels de l'encodeur : esp_audio_codec 2.6.2 ne la fournit pas en
-     * AAC brut (spec_info_len = 0), ce qui privait les vidéos de leur piste son. */
+    /* Encodeur AAC avec en-tête ADTS (réglage par défaut, celui d'esp_capture) : le
+     * multiplexeur MP4 en tire la configuration de la piste son. */
     esp_aac_enc_config_t aac_cfg = ESP_AAC_ENC_CONFIG_DEFAULT();
     aac_cfg.sample_rate = AUDIO_SAMPLE_RATE;
     aac_cfg.channel = AUDIO_CHANNELS;
     aac_cfg.bits_per_sample = AUDIO_BITS;
     aac_cfg.bitrate = AUDIO_BITRATE;
-    aac_cfg.adts_used = false;
+    aac_cfg.adts_used = true;
     esp_audio_enc_config_t enc_cfg = {
         .type = ESP_AUDIO_TYPE_AAC,
         .cfg = &aac_cfg,
@@ -400,26 +419,29 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
     esp_audio_enc_get_frame_size(s_au.enc, &in_size, &out_size);
     const uint32_t rate = enc_info.sample_rate ? enc_info.sample_rate : AUDIO_SAMPLE_RATE;
     const uint8_t channels = enc_info.channel ? enc_info.channel : AUDIO_CHANNELS;
-    if (in_size <= 0 || out_size <= 0 || !nid_aac_asc_lc(rate, channels, s_au.asc)) {
+    uint8_t probe[NID_AAC_ADTS_LEN];
+    const int bytes_per_sample = channels * (AUDIO_BITS / 8);
+    if (in_size <= 0 || out_size <= 0 || (in_size % bytes_per_sample) != 0 || !nid_aac_adts_build(rate, channels, 0, probe)) {
         ESP_LOGE(TAG, "encodeur AAC : taille des trames ou format (%" PRIu32 " Hz, %u voie(s)) invalides",
                  rate, (unsigned)channels);
         release_session();
         return ESP_FAIL;
     }
-    if (enc_info.spec_info_len > 0 &&
-        (enc_info.spec_info_len != NID_AAC_ASC_LEN || memcmp(enc_info.codec_spec_info, s_au.asc, NID_AAC_ASC_LEN) != 0)) {
-        ESP_LOGW(TAG, "AudioSpecificConfig de l'encodeur (%" PRIu32 " octets) différente de celle calculée : "
-                 "celle calculée est utilisée", enc_info.spec_info_len);
-    }
-    ESP_LOGD(TAG, "AAC-LC %" PRIu32 " Hz, %u voie(s), ASC %02X %02X", rate, (unsigned)channels, s_au.asc[0], s_au.asc[1]);
+    s_au.rate = rate;
+    s_au.channels = channels;
+    s_au.samples_per_frame = (uint32_t)(in_size / bytes_per_sample);
+    ESP_LOGD(TAG, "AAC-LC %" PRIu32 " Hz, %u voie(s), %" PRIu32 " échantillons par trame", rate, (unsigned)channels,
+             s_au.samples_per_frame);
     s_au.pcm_size = in_size;
     s_au.out_size = out_size;
     s_au.pcm = heap_caps_malloc((size_t)in_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    s_au.out = heap_caps_malloc((size_t)out_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* Marge devant la trame : place pour un en-tête ADTS si l'encodeur n'en met pas. */
+    s_au.out = heap_caps_malloc((size_t)out_size + NID_AAC_ADTS_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (s_au.pcm == NULL || s_au.out == NULL) {
         release_session();
         return ESP_ERR_NO_MEM;
     }
+    s_au.out_frame = s_au.out + NID_AAC_ADTS_LEN;
 
     esp_codec_dev_sample_info_t fs = {
         .sample_rate = AUDIO_SAMPLE_RATE,
@@ -437,6 +459,7 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
     s_au.sink = sink;
     s_au.ctx = ctx;
     s_au.frames = 0;
+    s_au.encoded = 0;
     s_au.t0_us = 0;
     atomic_store(&s_au.deliver, false);
     atomic_store(&s_au.run, true);
@@ -451,9 +474,9 @@ esp_err_t nid_capture_audio_start(nid_capture_audio_sink_t sink, void *ctx, nid_
     info->sample_rate = rate;
     info->channels = channels;
     info->bits_per_sample = AUDIO_BITS;
-    info->frame_ms = (uint32_t)((int64_t)in_size * 1000 / (AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * (AUDIO_BITS / 8)));
-    info->spec_info = s_au.asc;
-    info->spec_info_len = NID_AAC_ASC_LEN;
+    info->frame_ms = (uint32_t)((int64_t)s_au.samples_per_frame * 1000 / rate);
+    info->spec_info = NULL;         /* configuration lue par le multiplexeur dans les en-têtes ADTS */
+    info->spec_info_len = 0;
     return ESP_OK;
 }
 

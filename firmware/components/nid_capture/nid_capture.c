@@ -87,6 +87,7 @@
 #include "nid_capture_calc.h"
 #include "nid_capture_priv.h"
 #include "nid_overlay.h"
+#include "nid_writer.h"
 
 #if !CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE || !CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE || \
     !CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE
@@ -120,6 +121,7 @@ static const char *TAG = "nid_capture";
 #define H264_SPEC_MAX           256         /* SPS + PPS avec codes de début */
 
 #define MUXER_CACHE_SIZE        (32 * 1024)
+#define MP4_CLOSE_TIMEOUT_MS    30000       /* vidage du tampon d'écriture (jusqu'à 4 Mo) puis fsync */
 
 /* Identifiants des capteurs (ov5647.h, sc2336.h d'esp_cam_sensor) */
 #define OV5647_CHIP_PID         0x5647
@@ -187,6 +189,7 @@ typedef struct {
 /** Contexte d'un enregistrement (rappels du multiplexeur et de l'audio). */
 typedef struct {
     const char        *path;
+    nid_writer_t      *writer;          /*!< écriture asynchrone du MP4 (tampon PSRAM) */
     esp_muxer_handle_t muxer;
     int                video_idx;
     int                audio_idx;
@@ -195,6 +198,8 @@ typedef struct {
     nid_capture_audio_info_t audio_info;
     volatile bool      write_error;
     volatile bool      closed_ok;
+    uint32_t           audio_accepted;  /*!< trames AAC acceptées par le multiplexeur */
+    uint32_t           audio_refused;   /*!< trames AAC refusées (horodatage, flux) */
     uint8_t            spec[H264_SPEC_MAX];
     size_t             spec_len;
 } rec_t;
@@ -1339,15 +1344,20 @@ static bool h264_parse(const uint8_t *d, size_t len, uint8_t *spec, size_t spec_
     return idr;
 }
 
-/* Écriture du fichier MP4 : fopen / fwrite / fseek, fflush + fsync avant fclose. */
+/*
+ * Écriture du fichier MP4 par nid_writer : le multiplexeur dépose les données
+ * dans un tampon en PSRAM, une tâche dédiée les écrit sur le support. La boucle
+ * caméra n'attend plus la carte SD (ou la clé USB) ; ouverture et fermeture
+ * (vidage du tampon, fflush, fsync) restent synchrones.
+ */
 static void *mp4_on_open(char *path)
 {
-    FILE *f = fopen(path, "wb");
-    if (f == NULL) {
-        ESP_LOGE(TAG, "création de %s impossible (errno %d)", path, errno);
+    if (s_rec.writer == NULL || nid_writer_open(s_rec.writer, path) != ESP_OK) {
+        ESP_LOGE(TAG, "création de %s impossible", path);
         s_rec.write_error = true;
+        return NULL;
     }
-    return f;
+    return s_rec.writer;
 }
 
 static int mp4_on_write(void *writer, void *buffer, int len)
@@ -1355,8 +1365,7 @@ static int mp4_on_write(void *writer, void *buffer, int len)
     if (len <= 0) {
         return 0;
     }
-    size_t n = fwrite(buffer, 1, (size_t)len, (FILE *)writer);
-    if (n != (size_t)len) {
+    if (nid_writer_write((nid_writer_t *)writer, buffer, (size_t)len) != len) {
         s_rec.write_error = true;
         return -1;
     }
@@ -1365,7 +1374,7 @@ static int mp4_on_write(void *writer, void *buffer, int len)
 
 static int mp4_on_seek(void *writer, uint64_t pos)
 {
-    if (pos > (uint64_t)INT32_MAX || fseek((FILE *)writer, (long)pos, SEEK_SET) != 0) {
+    if (nid_writer_seek((nid_writer_t *)writer, pos) != 0) {
         s_rec.write_error = true;
         return -1;
     }
@@ -1374,24 +1383,14 @@ static int mp4_on_seek(void *writer, uint64_t pos)
 
 static int mp4_on_close(void *writer)
 {
-    FILE *f = (FILE *)writer;
-    int ret = 0;
-    if (fflush(f) != 0) {
-        ret = -1;
-    }
-    if (fsync(fileno(f)) != 0) {
-        ret = -1;
-    }
-    if (fclose(f) != 0) {
-        ret = -1;
-    }
-    if (ret == 0) {
+    esp_err_t err = nid_writer_close((nid_writer_t *)writer, MP4_CLOSE_TIMEOUT_MS);
+    if (err == ESP_OK) {
         s_rec.closed_ok = true;
-    } else {
-        s_rec.write_error = true;
-        ESP_LOGE(TAG, "fermeture du MP4 : erreur (errno %d)", errno);
+        return 0;
     }
-    return ret;
+    s_rec.write_error = true;
+    ESP_LOGE(TAG, "fermeture du MP4 : %s", esp_err_to_name(err));
+    return -1;
 }
 
 static esp_muxer_file_writer_t s_mp4_writer = {
@@ -1424,31 +1423,30 @@ static void rec_audio_sink(const uint8_t *data, uint32_t len, uint32_t pts_ms, v
     };
     xSemaphoreTake(s_mux_lock, portMAX_DELAY);
     if (rc->muxer != NULL && rc->audio_idx >= 0) {
-        if (esp_muxer_add_audio_packet(rc->muxer, rc->audio_idx, &pkt) != ESP_MUXER_ERR_OK) {
-            ESP_LOGD(TAG, "trame audio refusée");
+        esp_muxer_err_t me = esp_muxer_add_audio_packet(rc->muxer, rc->audio_idx, &pkt);
+        if (me == ESP_MUXER_ERR_OK) {
+            rc->audio_accepted++;
+        } else if (rc->audio_refused++ == 0) {
+            ESP_LOGW(TAG, "trame audio refusée par le multiplexeur (%d, pts %" PRIu32 " ms)", (int)me, pts_ms);
         }
     }
     xSemaphoreGive(s_mux_lock);
 }
 
-/** Déclaration des flux à la première image (IDR) : SPS/PPS en codec_spec_info. */
+/**
+ * Déclaration des flux à la première image (IDR) : SPS/PPS en codec_spec_info.
+ * Piste son déclarée avant la piste vidéo, sans AudioSpecificConfig : les
+ * trames AAC portent leur en-tête ADTS, que le multiplexeur exploite. C'est
+ * l'ordre et la forme qu'emploie esp_capture (capture_muxer.c) d'Espressif,
+ * dont les MP4 avec son sont lus par les lecteurs courants.
+ */
 static esp_err_t rec_add_streams(rec_t *rc, const uint8_t *frame, size_t len)
 {
     h264_parse(frame, len, rc->spec, sizeof(rc->spec), &rc->spec_len);
     ESP_RETURN_ON_FALSE(rc->spec_len > 0, ESP_ERR_INVALID_RESPONSE, TAG, "première image sans SPS/PPS");
 
-    esp_muxer_video_stream_info_t vi = {
-        .codec = ESP_MUXER_VDEC_H264,
-        .width = s_cap.width,
-        .height = s_cap.height,
-        .fps = s_cap.fps,
-        .min_packet_duration = 1000u / s_cap.fps,
-        .codec_spec_info = rc->spec,
-        .spec_info_len = (int)rc->spec_len,
-    };
     xSemaphoreTake(s_mux_lock, portMAX_DELAY);
-    esp_muxer_err_t me = esp_muxer_add_video_stream(rc->muxer, &vi, &rc->video_idx);
-    if (me == ESP_MUXER_ERR_OK && rc->with_audio) {
+    if (rc->with_audio) {
         esp_muxer_audio_stream_info_t ai = {
             .codec = ESP_MUXER_ADEC_AAC,
             .channel = rc->audio_info.channels,
@@ -1459,12 +1457,23 @@ static esp_err_t rec_add_streams(rec_t *rc, const uint8_t *frame, size_t len)
             .spec_info_len = (int)rc->audio_info.spec_info_len,
         };
         int idx = -1;
-        if (esp_muxer_add_audio_stream(rc->muxer, &ai, &idx) == ESP_MUXER_ERR_OK) {
+        esp_muxer_err_t ae = esp_muxer_add_audio_stream(rc->muxer, &ai, &idx);
+        if (ae == ESP_MUXER_ERR_OK) {
             rc->audio_idx = idx;
         } else {
-            ESP_LOGW(TAG, "flux audio refusé par le multiplexeur : vidéo seule");
+            ESP_LOGW(TAG, "flux audio refusé par le multiplexeur (%d) : vidéo seule", (int)ae);
         }
     }
+    esp_muxer_video_stream_info_t vi = {
+        .codec = ESP_MUXER_VDEC_H264,
+        .width = s_cap.width,
+        .height = s_cap.height,
+        .fps = s_cap.fps,
+        .min_packet_duration = 1000u / s_cap.fps,
+        .codec_spec_info = rc->spec,
+        .spec_info_len = (int)rc->spec_len,
+    };
+    esp_muxer_err_t me = esp_muxer_add_video_stream(rc->muxer, &vi, &rc->video_idx);
     xSemaphoreGive(s_mux_lock);
     ESP_RETURN_ON_FALSE(me == ESP_MUXER_ERR_OK, ESP_FAIL, TAG, "flux vidéo refusé par le multiplexeur (%d)", (int)me);
     rc->streams_added = true;
@@ -1482,6 +1491,9 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
 
     ESP_RETURN_ON_ERROR(cam_configure(true), TAG, "caméra (vidéo)");
 
+    /* Écrivain asynchrone : tampon en PSRAM vidé par une tâche dédiée. */
+    ESP_RETURN_ON_ERROR(nid_writer_create(0, &rc->writer), TAG, "tampon d'écriture");
+
     /* Multiplexeur MP4 (configuration de l'exemple video_muxer, un seul segment) */
     mp4_muxer_config_t mp4_cfg;
     memset(&mp4_cfg, 0, sizeof(mp4_cfg));
@@ -1493,9 +1505,16 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     mp4_cfg.display_in_order = true;     /* pas d'images B : dts = pts */
     mp4_cfg.moov_before_mdat = false;
     esp_muxer_handle_t muxer = esp_muxer_open(&mp4_cfg.base_config, sizeof(mp4_cfg));
-    ESP_RETURN_ON_FALSE(muxer != NULL, ESP_ERR_NO_MEM, TAG, "ouverture du multiplexeur MP4 impossible");
+    if (muxer == NULL) {
+        nid_writer_destroy(rc->writer);
+        rc->writer = NULL;
+        ESP_LOGE(TAG, "ouverture du multiplexeur MP4 impossible");
+        return ESP_ERR_NO_MEM;
+    }
     if (esp_muxer_set_file_writer(muxer, &s_mp4_writer) != ESP_MUXER_ERR_OK) {
         esp_muxer_close(muxer);
+        nid_writer_destroy(rc->writer);
+        rc->writer = NULL;
         ESP_LOGE(TAG, "écriture du MP4 : configuration refusée");
         return ESP_FAIL;
     }
@@ -1619,8 +1638,8 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         esp_muxer_err_t me = esp_muxer_add_video_packet(rc->muxer, rc->video_idx, &pkt);
         xSemaphoreGive(s_mux_lock);
         m2m_requeue(s_cap.h264_fd);
-        if (me != ESP_MUXER_ERR_OK || rc->write_error) {
-            ESP_LOGE(TAG, "écriture de la vidéo impossible (%d) : carte pleine ou retirée ?", (int)me);
+        if (me != ESP_MUXER_ERR_OK || rc->write_error || nid_writer_failed(rc->writer)) {
+            ESP_LOGE(TAG, "écriture de la vidéo impossible (%d) : support plein, retiré ou trop lent ?", (int)me);
             err = ESP_FAIL;
             break;
         }
@@ -1634,12 +1653,25 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         m2m_stop(s_cap.h264_fd);
     }
     if (rc->with_audio) {
-        st->audio_frames = nid_capture_audio_stop();
+        nid_capture_audio_stop();
     }
     xSemaphoreTake(s_mux_lock, portMAX_DELAY);
-    esp_muxer_err_t ce = esp_muxer_close(muxer);
+    esp_muxer_err_t ce = esp_muxer_close(muxer);     /* moov, puis vidage du tampon, fsync, fclose */
     rc->muxer = NULL;
     xSemaphoreGive(s_mux_lock);
+    st->audio_frames = rc->audio_accepted;
+    st->audio_refused = rc->audio_refused;
+
+    nid_writer_stats_t ws;
+    nid_writer_get_stats(rc->writer, &ws);
+    nid_writer_destroy(rc->writer);
+    rc->writer = NULL;
+    st->write_peak_kb = (uint32_t)(ws.peak_bytes / 1024u);
+    st->write_stall_ms = ws.stall_ms;
+    st->write_slowest_ms = ws.slowest_write_ms;
+    if (ws.error) {
+        rc->write_error = true;
+    }
 
     struct stat sb;
     if (stat(path, &sb) == 0) {
@@ -1651,6 +1683,12 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     ESP_LOGI(TAG, "vidéo %s : %" PRIu32 " images (%" PRIu32 " perdues), %" PRIu32 " trames son, %" PRIu32 " ms, %" PRIu64 " octets, %lld ms",
              path, st->video_frames, st->dropped_frames, st->audio_frames, st->duration_ms, st->bytes,
              (long long)((esp_timer_get_time() - t_begin) / 1000));
+    ESP_LOGI(TAG, "écriture : tampon max %" PRIu32 " ko sur %u ko, attente %" PRIu32 " ms, écriture la plus lente %" PRIu32 " ms",
+             st->write_peak_kb, (unsigned)(ws.buffer_bytes / 1024u), st->write_stall_ms, st->write_slowest_ms);
+    if (rc->with_audio && st->audio_frames == 0) {
+        ESP_LOGW(TAG, "aucune trame son dans le fichier (%" PRIu32 " refusée(s)) : vérifier le micro (vumètre du banc)",
+                 st->audio_refused);
+    }
 
     if (err != ESP_OK) {
         return err;

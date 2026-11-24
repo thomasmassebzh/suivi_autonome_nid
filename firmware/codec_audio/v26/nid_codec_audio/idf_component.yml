@@ -1,0 +1,5 @@
+## esp_audio_codec pour ESP32-P4 rév. ≥ 3.0 (P4X, Waveshare ESP32-P4NRW32X).
+dependencies:
+  espressif/esp_audio_codec:
+    version: "~2.6.2"
+    require: public

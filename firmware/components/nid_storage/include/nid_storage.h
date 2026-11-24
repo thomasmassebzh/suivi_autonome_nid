@@ -1,12 +1,17 @@
 /*
- * nid_storage — carte microSD, nommage des fichiers, journal
+ * nid_storage — support de stockage, nommage des fichiers, journal
  *
- * Organisation sur la carte (FP1.6, FP1.7, FP1.8) :
+ * Support : carte microSD ou clé / disque USB (menuconfig « Suivi nid —
+ * Stockage »), monté dans les deux cas sous /sdcard.
+ *
+ * Organisation sur le support (FP1.6, FP1.7, FP1.8) :
  *   /sdcard/config.ini                                   réglages (nid_config)
  *   /sdcard/<SYS>_<NID>/journal.csv                      journal des événements
  *   /sdcard/<SYS>_<NID>/<AAAAMMJJ>/<SYS>_<NID>_<AAAAMMJJ>_<HHMMSS>_V0042.mp4
  *   /sdcard/<SYS>_<NID>/<AAAAMMJJ>/<SYS>_<NID>_<AAAAMMJJ>_<HHMMSS>_P0123.jpg
  * Date et heure en heure locale (fuseau de config.ini), un dossier par jour.
+ * Heure perdue (date antérieure à 2025) : « SANSHEURE » à la place de la date
+ * et de l'heure (dossier et nom), plutôt qu'une date fausse.
  *
  * Intégrité (FP1.7, F0 « 0 fichier corrompu ») : chaque média est écrit sous
  * un nom temporaire « .tmp », puis renommé seulement après fermeture + fsync.
@@ -29,13 +34,31 @@ extern "C" {
 #define NID_CONFIG_FILE     NID_SD_MOUNT_POINT "/config.ini"
 #define NID_PATH_MAX        160
 
-/** Monte la carte microSD (SDMMC, alimentation par le LDO interne, FAT32, noms longs). Idempotent. */
+typedef enum {
+    NID_STORAGE_MEDIUM_NONE = 0,
+    NID_STORAGE_MEDIUM_SD,      /*!< carte microSD */
+    NID_STORAGE_MEDIUM_USB,     /*!< clé ou disque USB (classe de stockage de masse) */
+} nid_storage_medium_t;
+
+/**
+ * Monte le support choisi (FAT32, noms longs) : carte microSD (SDMMC, LDO
+ * interne, interrupteur d'alimentation éventuel), clé USB (5 V USB mis sous
+ * tension, énumération, au plus CONFIG_NID_USB_CONNECT_TIMEOUT_MS), ou clé USB
+ * sinon carte SD. Idempotent.
+ */
 esp_err_t nid_storage_mount(void);
 
-/** Démonte proprement la carte (tous les fichiers doivent être fermés). Idempotent. */
+/** Démonte proprement le support et le met hors tension (tous les fichiers fermés). Idempotent. */
 esp_err_t nid_storage_unmount(void);
 
+/** true si un support est monté (false aussi si la clé USB a été retirée). */
 bool nid_storage_is_mounted(void);
+
+/** Support monté. */
+nid_storage_medium_t nid_storage_medium(void);
+
+/** « carte SD », « clé USB » ou « aucun ». */
+const char *nid_storage_medium_str(void);
 
 /**
  * Capacité totale et espace libre du volume FAT monté, en octets (calcul 64 bits :
@@ -46,12 +69,13 @@ esp_err_t nid_storage_get_space(uint64_t *total_bytes, uint64_t *free_bytes);
 
 /** Description du volume FAT monté (diagnostic, banc d'essai). */
 typedef struct {
-    uint64_t card_bytes;       /*!< capacité de la carte (registre CSD) */
+    nid_storage_medium_t medium;
+    uint64_t card_bytes;       /*!< capacité du support (registre CSD de la carte, capacité SCSI de la clé) */
     uint64_t volume_bytes;     /*!< zone de données du volume FAT monté */
     uint64_t free_bytes;       /*!< espace libre */
-    uint32_t cluster_bytes;    /*!< taille d'une grappe (« taille d'unité d'allocation ») */
+    uint32_t cluster_bytes;    /*!< taille d'une grappe (« taille d'unité d'allocation ») ; 0 si inconnue (USB) */
     uint32_t first_sector;     /*!< premier secteur du volume (0 : carte sans table de partitions) */
-    uint8_t  fat_type;         /*!< 12, 16 ou 32 */
+    uint8_t  fat_type;         /*!< 12, 16 ou 32 ; 0 si inconnu (USB) */
 } nid_storage_volume_t;
 
 /**

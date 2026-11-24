@@ -18,36 +18,53 @@ on:
 
 jobs:
   compilation:
-    name: Compilation ${{ matrix.projet }} (ESP-IDF v6.1, esp32p4)
+    name: Compilation ${{ matrix.nom }} (ESP-IDF v6.1, esp32p4)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - projet: firmware
+            nom: firmware
             binaire: suivi_nid
             artefact: suivi_nid-esp32p4
+            build: build
+            defauts: "sdkconfig.defaults"
+          # Carte Waveshare ESP32-P4-WIFI6 (puce rév. 1.x), pile RTC et stockage USB :
+          # compile les chemins de code propres à la version client.
+          - projet: firmware
+            nom: firmware-waveshare-usb
+            binaire: suivi_nid
+            artefact: suivi_nid-waveshare-rev1-usb
+            build: build_waveshare
+            defauts: "sdkconfig.defaults;sdkconfig.defaults.waveshare;sdkconfig.defaults.rev1;sdkconfig.defaults.vbat;sdkconfig.defaults.usb"
           - projet: banc_essai
+            nom: banc_essai
             binaire: banc_essai
             artefact: banc_essai-esp32p4
+            build: build
+            defauts: "sdkconfig.defaults"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compiler ${{ matrix.projet }}
+      - name: Compiler ${{ matrix.nom }}
         uses: espressif/esp-idf-ci-action@v1.2.0
         with:
           esp_idf_version: v6.1
           target: esp32p4
           path: ${{ matrix.projet }}
+          command: >-
+            idf.py -B ${{ matrix.build }} -D SDKCONFIG=${{ matrix.build }}/sdkconfig
+            -D SDKCONFIG_DEFAULTS="${{ matrix.defauts }}" build
 
       - name: Publier les binaires
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artefact }}
           path: |
-            ${{ matrix.projet }}/build/${{ matrix.binaire }}.bin
-            ${{ matrix.projet }}/build/bootloader/bootloader.bin
-            ${{ matrix.projet }}/build/partition_table/partition-table.bin
-            ${{ matrix.projet }}/build/flash_args
+            ${{ matrix.projet }}/${{ matrix.build }}/${{ matrix.binaire }}.bin
+            ${{ matrix.projet }}/${{ matrix.build }}/bootloader/bootloader.bin
+            ${{ matrix.projet }}/${{ matrix.build }}/partition_table/partition-table.bin
+            ${{ matrix.projet }}/${{ matrix.build }}/flash_args
             ${{ matrix.projet }}/dependencies.lock
           if-no-files-found: error

@@ -223,10 +223,49 @@ static void test_slots(void)
     CHECK(!nid_capture_frame_is_fresh(1500, 4000) && nid_capture_frame_is_fresh(2000, 4000), "seuil minimal 2 ms");
 }
 
+/* En-tête ADTS construit : relu par nid_aac_adts_header_len, champs vérifiés. */
+static void test_adts_build(void)
+{
+    uint8_t frame[7 + 200];
+    memset(frame, 0xA5, sizeof(frame));
+    CHECK(nid_aac_adts_build(16000, 1, 200, frame), "construction 16 kHz mono");
+    CHECK(frame[0] == 0xFF && frame[1] == 0xF1, "synchro et protection_absent");
+    CHECK(((frame[2] >> 6) & 3) == 1, "profil LC");
+    CHECK(((frame[2] >> 2) & 0xF) == 8, "index de fréquence 16 kHz = 8");
+    CHECK((((frame[2] & 1) << 2) | (frame[3] >> 6)) == 1, "une voie");
+    size_t flen = ((size_t)(frame[3] & 3) << 11) | ((size_t)frame[4] << 3) | (frame[5] >> 5);
+    CHECK(flen == 207, "longueur de trame %zu (attendu 207)", flen);
+    CHECK(nid_aac_adts_header_len(frame, sizeof(frame)) == 7, "en-tête relu");
+    CHECK(!nid_aac_adts_build(15000, 1, 10, frame), "fréquence hors table refusée");
+    CHECK(!nid_aac_adts_build(16000, 1, 0x2000, frame), "trame trop longue refusée");
+    CHECK(nid_aac_adts_build(44100, 2, 10, frame) && ((frame[2] >> 2) & 0xF) == 4, "44,1 kHz stéréo");
+}
+
+static void test_aac_pts(void)
+{
+    CHECK(nid_aac_frame_pts_ms(0, 1024, 16000) == 0, "première trame");
+    CHECK(nid_aac_frame_pts_ms(1, 1024, 16000) == 64, "deuxième trame : 64 ms");
+    CHECK(nid_aac_frame_pts_ms(469, 1024, 16000) == 30016, "30 s de son : trame 469 à 30016 ms");
+    CHECK(nid_aac_frame_pts_ms(3, 1024, 44100) == 69, "44,1 kHz : arrondi inférieur");
+    CHECK(nid_aac_frame_pts_ms(10, 1024, 0) == 0, "fréquence nulle");
+    uint32_t prev = 0;
+    bool mono = true;
+    for (uint32_t i = 1; i < 100000; i++) {
+        uint32_t p = nid_aac_frame_pts_ms(i, 1024, 44100);
+        if (p <= prev) {
+            mono = false;
+        }
+        prev = p;
+    }
+    CHECK(mono, "horodatages strictement croissants");
+}
+
 int main(void)
 {
     test_asc();
     test_adts();
+    test_adts_build();
+    test_aac_pts();
     test_slots();
     printf("%d vérification(s) réussie(s), %d échec(s)\n", s_ok, s_fail);
     return s_fail ? 1 : 0;
