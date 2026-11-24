@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-/** Rappel de remise d'une trame AAC brute (sans en-tête ADTS), appelé depuis la tâche audio. */
+/** Rappel de remise d'une trame AAC avec son en-tête ADTS, appelé depuis la tâche audio. */
 typedef void (*nid_capture_audio_sink_t)(const uint8_t *data, uint32_t len, uint32_t pts_ms, void *ctx);
 
 /** Caractéristiques de la piste son, pour la déclaration du flux MP4. */
@@ -25,7 +25,7 @@ typedef struct {
     uint8_t        channels;         /*!< nombre de voies */
     uint8_t        bits_per_sample;  /*!< bits par échantillon */
     uint32_t       frame_ms;         /*!< durée d'une trame AAC (ms, arrondie) */
-    const uint8_t *spec_info;        /*!< AudioSpecificConfig (calculée, 2 octets), valide jusqu'à nid_capture_audio_stop() */
+    const uint8_t *spec_info;        /*!< configuration du codec : NULL (lue dans les en-têtes ADTS par le multiplexeur) */
     uint32_t       spec_info_len;
 } nid_capture_audio_info_t;
 

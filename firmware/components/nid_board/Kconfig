@@ -1,6 +1,31 @@
 menu "Suivi nid — Carte et brochage"
 
-    comment "Valeurs par défaut : ESP32-P4X-Function-EV-Board (connecteur J1). -1 = non câblé."
+    choice NID_BOARD
+        prompt "Carte de développement"
+        default NID_BOARD_P4X_FUNC_EV
+        help
+            Fixe les valeurs par défaut du brochage ci-dessous (chaque broche
+            reste modifiable). Pour la carte Waveshare, partir aussi du fichier
+            sdkconfig.defaults.waveshare (révision de puce, voir le README).
+
+        config NID_BOARD_P4X_FUNC_EV
+            bool "Espressif ESP32-P4X-Function-EV-Board (prototype de développement)"
+        config NID_BOARD_WAVESHARE_P4_WIFI6
+            bool "Waveshare ESP32-P4-WIFI6 / P4 + C6 (version client)"
+            help
+                Cartes Waveshare ESP32-P4 + ESP32-C6 au brochage commun : carte SD
+                4 bits sur les GPIO 39 à 44 alimentée par un interrupteur sur
+                GPIO45 (actif bas), codec ES8311 (I2S 9 à 13, ampli GPIO53), I2C
+                sur 7/8, C6 en SDIO (14 à 19, reset GPIO54), connecteur USB 2.0
+                OTG haut débit, support de pile RTC (rechargeable uniquement).
+    endchoice
+
+    config NID_BOARD_NAME
+        string
+        default "Waveshare ESP32-P4-WIFI6" if NID_BOARD_WAVESHARE_P4_WIFI6
+        default "ESP32-P4X-Function-EV-Board"
+
+    comment "-1 = non câblé. Brochage de terrain (PIR, bouton, LED IR...) : connecteur J1 de la P4X ; à vérifier sur le connecteur 40 broches de la Waveshare."
 
     config NID_PIN_PIR
         int "GPIO sortie du détecteur PIR (LP GPIO 0-15, réveil de veille profonde)"
@@ -35,6 +60,7 @@ menu "Suivi nid — Carte et brochage"
     config NID_PIN_STATUS_LED
         int "GPIO voyant d'état (allumé uniquement en installation ; -1 = aucun)"
         range -1 54
+        default -1 if NID_BOARD_WAVESHARE_P4_WIFI6
         default 46
         help
             Attention : sur l'ESP32-P4, les GPIO 39 à 48 forment le domaine d'E/S
@@ -158,6 +184,22 @@ menu "Suivi nid — Carte et brochage"
         range 10000 400000
         default 100000
 
+    config NID_PIN_USB_VBUS_EN
+        int "GPIO de l'interrupteur du 5 V USB (stockage USB ; -1 = aucun)"
+        range -1 54
+        default -1
+        help
+            Commande d'un interrupteur de charge (ex. TPS2051, AP2553) sur le 5 V
+            du connecteur USB hôte : la clé ou le disque USB n'est alimenté que
+            pendant les écritures (une clé consomme 20 à 100 mA au repos, plus
+            que toute la veille profonde). Sans interrupteur (-1), le 5 V USB
+            reste sous tension : acceptable au banc, pas sur le terrain.
+
+    config NID_USB_VBUS_ACTIVE_HIGH
+        bool "Interrupteur du 5 V USB actif au niveau haut"
+        default y
+        depends on NID_PIN_USB_VBUS_EN >= 0
+
     config NID_PIN_C6_RESET
         int "GPIO reset du coprocesseur Wi-Fi ESP32-C6 (-1 = aucun)"
         range -1 54
@@ -172,6 +214,7 @@ menu "Suivi nid — Carte et brochage"
     config NID_PIN_LCD_BACKLIGHT
         int "GPIO rétroéclairage LCD, maintenu éteint (-1 = aucun)"
         range -1 54
+        default -1 if NID_BOARD_WAVESHARE_P4_WIFI6
         default 26
 
     config NID_PIN_AUDIO_PA
@@ -240,6 +283,19 @@ menu "Suivi nid — Carte et brochage"
                 tout le domaine d'E/S des GPIO 39 à 48 ; il doit être libéré au
                 démontage de la carte (consommation en veille) : nid_power le
                 coupe de toute façon juste avant la veille profonde.
+        config NID_PIN_SD_POWER
+            int "GPIO interrupteur d'alimentation de la carte SD (-1 = aucun)"
+            range -1 54
+            default 45 if NID_BOARD_WAVESHARE_P4_WIFI6
+            default -1
+            help
+                Waveshare : GPIO45 commande le transistor (P-MOS) qui alimente la
+                carte microSD ; niveau bas = alimentée. La P4X n'en a pas (carte
+                alimentée en permanence, domaine d'E/S par le LDO VO4).
+        config NID_SD_POWER_ACTIVE_LOW
+            bool "Alimentation de la carte SD active au niveau bas"
+            default y
+            depends on NID_PIN_SD_POWER >= 0
         config NID_PIN_SD_CLK
             int "SD CLK"
             default 43

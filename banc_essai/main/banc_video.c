@@ -26,7 +26,7 @@
 
 static const char *TAG = "banc";
 
-static char s_bilan[512] = "aucun";         /* dernière ligne de bilan (commande info) */
+static char s_bilan[640] = "aucun";         /* dernière ligne de bilan (commande info) */
 static uint32_t s_seq_video;
 static uint32_t s_seq_photo;
 
@@ -115,11 +115,13 @@ static void bilan_video(const banc_demande_t *d, const char *motif, const nid_me
              "BILAN video fichier=%s motif=%s resultat=%s erreur=%s duree=%" PRIu32 ".%02" PRIu32 "s images=%" PRIu32
              " cadence=%" PRIu32 ".%" PRIu32 "ips perdues=%" PRIu32 " trames_son=%" PRIu32 " taille=%" PRIu32
              ".%02" PRIu32 "Mo debit=%" PRIu32 "kbit/s premiere_image=%" PRId32 "ms reglages=%ux%u,%uips,%" PRIu32
-             "kbit/s,son=%s capteur=%s",
+             "kbit/s,son=%s capteur=%s son_refusees=%" PRIu32 " tampon_max=%" PRIu32 "ko attente=%" PRIu32
+             "ms ecriture_max=%" PRIu32 "ms support=%s",
              f->name, motif, resultat, esp_err_to_name(b->err), ms / 1000, (ms % 1000) / 10, st->video_frames,
              ips10 / 10, ips10 % 10, st->dropped_frames, st->audio_frames, mo100 / 100, mo100 % 100, kbps,
              b->premiere_ms, r->width, r->height, r->fps, r->bitrate_kbps, r->audio ? "oui" : "non",
-             nid_capture_sensor_name());
+             nid_capture_sensor_name(), st->audio_refused, st->write_peak_kb, st->write_stall_ms,
+             st->write_slowest_ms, nid_storage_medium_str());
     ESP_LOGI(TAG, "%s", s_bilan);
 
     if (b->annule) {

@@ -44,6 +44,7 @@
 
 #include "nid_board.h"
 #include "nid_capture.h"
+#include "nid_clock.h"
 #include "nid_storage.h"
 
 static const char *TAG = "banc";
@@ -198,8 +199,8 @@ esp_err_t banc_regler_heure(time_t t, const char *origine)
         return ESP_ERR_INVALID_ARG;
     }
     const time_t avant = time(NULL);
-    const struct timeval tv = { .tv_sec = t };
-    if (settimeofday(&tv, NULL) != 0) {
+    /* Par nid_clock, comme le firmware : mesure de la dérive de la carte (réglages à 24 h d'écart). */
+    if (nid_clock_set_time(t) != ESP_OK) {
         return ESP_FAIL;
     }
     char txt[24];

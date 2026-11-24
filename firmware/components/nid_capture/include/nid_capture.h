@@ -49,6 +49,10 @@ typedef struct {
     uint64_t bytes;            /*!< taille du fichier */
     uint32_t duration_ms;      /*!< durée effective */
     uint32_t first_frame_ms;   /*!< instant de la 1re image encodée, en ms depuis le démarrage (esp_timer) */
+    uint32_t audio_refused;    /*!< trames AAC refusées par le multiplexeur (0 attendu) */
+    uint32_t write_peak_kb;    /*!< remplissage maximal du tampon d'écriture (PSRAM) */
+    uint32_t write_stall_ms;   /*!< attente de la caméra sur un tampon plein (0 attendu) */
+    uint32_t write_slowest_ms; /*!< écriture la plus lente sur le support (diagnostic carte SD / clé USB) */
 } nid_capture_stats_t;
 
 /**

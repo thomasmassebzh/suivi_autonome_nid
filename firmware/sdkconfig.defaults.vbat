@@ -1,0 +1,6 @@
+# Pile de sauvegarde de l'horloge (VBAT) : l'heure est conservée pendant une
+# coupure d'alimentation (échange de batterie). Uniquement si une pile
+# RECHARGEABLE est en place (support « RTC battery » des cartes Waveshare,
+# ex. ML1220 / ML2032) : le firmware la recharge depuis le 3,3 V.
+CONFIG_ESP_VBAT_INIT_AUTO=y
+CONFIG_ESP_VBAT_USE_RECHARGEABLE_BATTERY=y

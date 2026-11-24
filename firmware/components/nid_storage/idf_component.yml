@@ -1,0 +1,8 @@
+## Stockage USB (classe MSC) : pilote usb_host_msc d'Espressif, qui tire la
+## bibliothèque hôte USB (composant espressif/usb, sorti d'ESP-IDF en v6).
+dependencies:
+  idf: ">=6.1"
+  espressif/usb_host_msc:
+    version: "^1.2.0"
+    rules:
+      - if: "target in [esp32p4]"

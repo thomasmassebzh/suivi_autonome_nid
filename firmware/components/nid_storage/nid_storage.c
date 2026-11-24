@@ -1,8 +1,17 @@
 /*
- * nid_storage — carte microSD, nommage des fichiers, journal
+ * nid_storage — support de stockage (carte microSD ou clé USB), nommage des
+ * fichiers, journal
  *
- * Montage SDMMC (emplacement 0, alimentation par le LDO interne), FAT sans
- * jamais formater. Les médias sont écrits sous « .tmp » puis renommés ; au
+ * Supports (menuconfig « Suivi nid — Stockage ») :
+ *  - carte microSD : SDMMC emplacement 0, domaine d'E/S alimenté par le LDO
+ *    interne, carte alimentée par un interrupteur sur la Waveshare ;
+ *  - clé ou disque USB : hôte USB 2.0 haut débit de l'ESP32-P4, pilote
+ *    usb_host_msc (motif de l'exemple msc d'ESP-IDF), 5 V USB commandé par un
+ *    interrupteur facultatif et coupé au démontage. Le câble USB peut atteindre
+ *    5 m (USB 2.0) : clé et batterie au pied de l'arbre, relève sans grimper ;
+ *  - automatique : clé USB si elle répond, sinon carte microSD.
+ * Les deux supports sont montés au même endroit (/sdcard) : le reste du
+ * firmware ne voit pas la différence. FAT sans jamais formater. Les médias sont écrits sous « .tmp » puis renommés ; au
  * démarrage, les « .tmp » restants deviennent « _INCOMPLET ». Le journal CSV
  * est ouvert, écrit, fsync puis fermé à chaque ligne : une coupure ne peut
  * perdre que la ligne en cours.
@@ -37,10 +46,25 @@
 #include "diskio_sdmmc.h"
 #include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
+#include "sdmmc_cmd.h"
+#include "esp_heap_caps.h"
+#include "esp_intr_alloc.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nid_board.h"
 #include "nid_storage_calc.h"
+
+#if CONFIG_NID_STORAGE_USB || CONFIG_NID_STORAGE_AUTO
+#define NID_STORAGE_HAS_USB 1
+#include "usb/usb_host.h"
+#include "usb/msc_host.h"
+#include "usb/msc_host_vfs.h"
+#else
+#define NID_STORAGE_HAS_USB 0
+#endif
 
 static const char *TAG = "nid_storage";
 
@@ -55,6 +79,12 @@ static const char *TAG = "nid_storage";
 #define JOURNAL_FILE        "journal.csv"
 #define JOURNAL_HEADER      "date_heure;evenement;details;batterie_mV;temperature_C\n"
 #define LINE_TAIL_RESERVE   40      /* guillemet fermant, batterie, température, fin de ligne */
+#define TIME_VALID_MIN_UTC  1735689600LL   /* 2025-01-01 : en deçà, l'heure est perdue */
+#define SD_POWER_SETTLE_MS  20      /* montée de l'alimentation de la carte (interrupteur Waveshare) */
+#define USB_VBUS_SETTLE_MS  100     /* montée du 5 V USB avant l'énumération */
+#define USB_TASK_STACK      4096
+#define USB_TASK_PRIO       5
+#define USB_STOP_TIMEOUT_MS 2000
 
 static StaticSemaphore_t s_fs_lock_buf;
 static SemaphoreHandle_t s_fs_lock;                 /* créé au premier usage (voir fs_lock()) */
@@ -63,6 +93,7 @@ static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static sdmmc_card_t *s_card;
 static sd_pwr_ctrl_handle_t s_pwr_handle;
 static volatile bool s_mounted;
+static nid_storage_medium_t s_medium = NID_STORAGE_MEDIUM_NONE;
 
 /* Protégés par s_state_mux. */
 static char s_system_id[ID_MAX_LEN + 1];
@@ -166,19 +197,62 @@ static void sanitize_id(char *out, size_t out_size, const char *in, const char *
 
 static void log_volume(void);
 
+/* ------------------------------------------------------------------------- */
+/* Carte microSD                                                              */
+/* ------------------------------------------------------------------------- */
+
 static void release_power(void)
 {
+    nid_board_sd_power(false);
     if (s_pwr_handle != NULL) {
         sd_pwr_ctrl_del_on_chip_ldo(s_pwr_handle);
         s_pwr_handle = NULL;
     }
 }
 
-/* ------------------------------------------------------------------------- */
-/* Montage                                                                    */
-/* ------------------------------------------------------------------------- */
+/**
+ * Diagnostic d'une carte dont le volume ne convient pas (verrou fichiers pris) :
+ * lit le secteur 0 et décrit la table de partitions. Cas typique : carte
+ * d'un Raspberry Pi (petite partition FAT « boot » + partition Linux), ou
+ * carte de 64 Go et plus livrée en exFAT (non pris en charge par FatFs ici).
+ */
+static void log_partitions(sdmmc_card_t *card)
+{
+    if (card == NULL) {
+        return;
+    }
+    uint8_t *s0 = heap_caps_malloc(512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s0 == NULL) {
+        return;
+    }
+    if (sdmmc_read_sectors(card, s0, 0, 1) == ESP_OK) {
+        nid_mbr_part_t p[4];
+        const int n = nid_mbr_parse(s0, p);
+        if (n < 0) {
+            ESP_LOGW(TAG, "carte sans table de partitions (volume unique)");
+        } else {
+            ESP_LOGW(TAG, "table de partitions de la carte : %d partition(s)", n);
+            bool fat = false;
+            for (int i = 0; i < n; i++) {
+                ESP_LOGW(TAG, "  partition %d : %s (type 0x%02X), %" PRIu64 " Mo", i + 1, nid_mbr_type_name(p[i].type),
+                         p[i].type, (uint64_t)p[i].sectors * 512u / 1000000u);
+                fat = fat || nid_mbr_is_fat(p[i].type);
+                if (p[i].type == 0x07) {
+                    ESP_LOGW(TAG, "  → exFAT n'est pas lu par le firmware : reformater la carte en FAT32");
+                }
+            }
+            if (n > 1) {
+                ESP_LOGW(TAG, "  → seule la première partition FAT est utilisée : reformater la carte "
+                         "en une seule partition FAT32 (SD Card Formatter)");
+            } else if (n == 1 && !fat) {
+                ESP_LOGW(TAG, "  → pas de partition FAT : reformater la carte en FAT32");
+            }
+        }
+    }
+    heap_caps_free(s0);
+}
 
-/** Monte la carte (verrou fichiers pris, carte non montée). */
+/** Monte la carte (verrou fichiers pris, aucun support monté). */
 static esp_err_t mount_card(void)
 {
     const nid_board_pins_t *pins = nid_board_pins();
@@ -188,7 +262,7 @@ static esp_err_t mount_card(void)
     host.max_freq_khz = CONFIG_NID_SD_FREQ_KHZ;
 
     if (CONFIG_NID_SD_LDO_CHAN >= 0) {
-        /* Le LDO interne alimente le domaine d'E/S de la carte (VO4 sur la P4X). */
+        /* Le LDO interne alimente le domaine d'E/S de la carte (VO4). */
         const sd_pwr_ctrl_ldo_config_t ldo_cfg = { .ldo_chan_id = CONFIG_NID_SD_LDO_CHAN };
         const esp_err_t err = sd_pwr_ctrl_new_on_chip_ldo(&ldo_cfg, &s_pwr_handle);
         if (err != ESP_OK) {
@@ -197,6 +271,11 @@ static esp_err_t mount_card(void)
             return err;
         }
         host.pwr_ctrl_handle = s_pwr_handle;
+    }
+    /* Interrupteur d'alimentation de la carte (Waveshare, GPIO45) : après le LDO,
+     * la broche étant dans le domaine d'E/S qu'il alimente. */
+    if (nid_board_sd_power(true)) {
+        vTaskDelay(pdMS_TO_TICKS(SD_POWER_SETTLE_MS));
     }
 
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
@@ -216,7 +295,8 @@ static esp_err_t mount_card(void)
     const esp_err_t err = esp_vfs_fat_sdmmc_mount(NID_SD_MOUNT_POINT, &host, &slot, &mount_cfg, &s_card);
     if (err != ESP_OK) {
         if (err == ESP_FAIL) {
-            ESP_LOGE(TAG, "système de fichiers illisible (la carte doit être formatée en FAT32)");
+            ESP_LOGE(TAG, "système de fichiers illisible : la carte doit être formatée en FAT32 "
+                     "(les cartes de 64 Go et plus sont livrées en exFAT, non pris en charge)");
         } else {
             ESP_LOGE(TAG, "carte SD absente ou illisible : %s", esp_err_to_name(err));
         }
@@ -224,13 +304,261 @@ static esp_err_t mount_card(void)
         release_power();
         return err;
     }
+    s_medium = NID_STORAGE_MEDIUM_SD;
     s_mounted = true;
     ESP_LOGI(TAG, "carte SD montée : %llu Mo, bus %d bit(s), %d kHz",
              (unsigned long long)((uint64_t)s_card->csd.capacity * (uint64_t)s_card->csd.sector_size / (1024 * 1024)),
              slot.width, s_card->real_freq_khz);
-    log_volume();
+    return ESP_OK;
+}
 
-    /* Identifiants déjà connus (remontage après une pause) : la carte a pu être remplacée. */
+static esp_err_t unmount_card(void)
+{
+    esp_err_t err = ESP_OK;
+    if (s_card != NULL) {
+        err = esp_vfs_fat_sdcard_unmount(NID_SD_MOUNT_POINT, s_card);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "démontage de la carte SD : %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "carte SD démontée");
+        }
+        s_card = NULL;
+    }
+    release_power();    /* coupe la carte puis le LDO : le domaine d'E/S n'est plus alimenté */
+    return err;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Clé ou disque USB (hôte USB 2.0 haut débit de l'ESP32-P4, classe MSC)      */
+/* ------------------------------------------------------------------------- */
+
+#if NID_STORAGE_HAS_USB
+
+typedef struct {
+    bool                     connected;     /*!< true : branchement, false : retrait */
+    uint8_t                  address;
+    msc_host_device_handle_t handle;
+} usb_evt_t;
+
+static QueueHandle_t            s_usb_q;
+static SemaphoreHandle_t        s_usb_lib_done;
+static volatile bool            s_usb_no_clients;
+static volatile bool            s_usb_quit;
+static bool                     s_usb_msc_installed;
+static msc_host_device_handle_t s_msc_dev;
+static msc_host_vfs_handle_t    s_msc_vfs;
+static uint64_t                 s_usb_capacity;
+static volatile bool            s_usb_lost;
+
+/** Rappel du pilote MSC (tâche du pilote) : transmis à la tâche qui monte le support. */
+static void msc_event_cb(const msc_host_event_t *event, void *arg)
+{
+    (void)arg;
+    usb_evt_t ev = { 0 };
+    if (event->event == MSC_DEVICE_CONNECTED) {
+        ev.connected = true;
+        ev.address = event->device.address;
+    } else if (event->event == MSC_DEVICE_DISCONNECTED) {
+        ev.connected = false;
+        ev.handle = event->device.handle;
+        if (ev.handle == s_msc_dev && s_msc_dev != NULL) {
+            s_usb_lost = true;
+            ESP_LOGE(TAG, "support USB retiré pendant l'utilisation");
+        }
+    } else {
+        return;
+    }
+    xQueueSend(s_usb_q, &ev, 0);
+}
+
+/** Tâche de la bibliothèque hôte USB (motif de l'exemple msc d'ESP-IDF). */
+static void usb_lib_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t flags = 0;
+        usb_host_lib_handle_events(portMAX_DELAY, &flags);
+        if (flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            s_usb_no_clients = true;
+            if (usb_host_device_free_all() == ESP_OK) {
+                break;
+            }
+        }
+        if ((flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) && s_usb_no_clients) {
+            break;
+        }
+        if (s_usb_quit && !s_usb_msc_installed) {
+            /* Pilote MSC jamais installé : aucun client ne se désinscrira. */
+            s_usb_no_clients = true;
+            if (usb_host_device_free_all() == ESP_OK) {
+                break;
+            }
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+    usb_host_uninstall();
+    xSemaphoreGive(s_usb_lib_done);
+    vTaskDelete(NULL);
+}
+
+static void usb_stack_stop(void)
+{
+    if (s_usb_msc_installed) {
+        msc_host_uninstall();       /* client désinscrit : la tâche voit NO_CLIENTS */
+        s_usb_msc_installed = false;
+    }
+    s_usb_quit = true;
+    usb_host_lib_unblock();
+    if (xSemaphoreTake(s_usb_lib_done, pdMS_TO_TICKS(USB_STOP_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "arrêt de la pile USB : délai dépassé");
+    }
+    nid_board_usb_vbus(false);
+}
+
+/** Monte la clé USB (verrou fichiers pris, aucun support monté). */
+static esp_err_t mount_usb(uint32_t connect_timeout_ms)
+{
+    if (s_usb_q == NULL) {
+        s_usb_q = xQueueCreate(4, sizeof(usb_evt_t));
+        s_usb_lib_done = xSemaphoreCreateBinary();
+        if (s_usb_q == NULL || s_usb_lib_done == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    xQueueReset(s_usb_q);
+    xSemaphoreTake(s_usb_lib_done, 0);
+    s_usb_no_clients = false;
+    s_usb_quit = false;
+    s_usb_lost = false;
+    s_msc_dev = NULL;
+    s_msc_vfs = NULL;
+
+    const int64_t t0 = esp_timer_get_time();
+    if (nid_board_usb_vbus(true)) {
+        vTaskDelay(pdMS_TO_TICKS(USB_VBUS_SETTLE_MS));
+    }
+    const usb_host_config_t host_cfg = {
+        .skip_phy_setup = false,
+        .intr_flags = ESP_INTR_FLAG_LOWMED,
+    };
+    esp_err_t err = usb_host_install(&host_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "hôte USB : %s", esp_err_to_name(err));
+        nid_board_usb_vbus(false);
+        return err;
+    }
+    if (xTaskCreatePinnedToCore(usb_lib_task, "nid_usb", USB_TASK_STACK, NULL, USB_TASK_PRIO, NULL, 1) != pdPASS) {
+        usb_host_uninstall();
+        nid_board_usb_vbus(false);
+        return ESP_ERR_NO_MEM;
+    }
+    const msc_host_driver_config_t msc_cfg = {
+        .create_backround_task = true,
+        .task_priority = USB_TASK_PRIO,
+        .stack_size = USB_TASK_STACK,
+        .callback = msc_event_cb,
+    };
+    err = msc_host_install(&msc_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pilote de stockage USB : %s", esp_err_to_name(err));
+        usb_stack_stop();
+        return err;
+    }
+    s_usb_msc_installed = true;
+
+    /* Attente du branchement (énumération de la clé). */
+    usb_evt_t ev = { 0 };
+    bool found = false;
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(connect_timeout_ms);
+    while (!found) {
+        const TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(deadline - now) <= 0 || xQueueReceive(s_usb_q, &ev, deadline - now) != pdTRUE) {
+            break;
+        }
+        found = ev.connected;
+    }
+    if (!found) {
+        ESP_LOGW(TAG, "aucune clé USB détectée en %" PRIu32 " ms", connect_timeout_ms);
+        usb_stack_stop();
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    err = msc_host_install_device(ev.address, &s_msc_dev);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "clé USB non prise en charge : %s", esp_err_to_name(err));
+        s_msc_dev = NULL;
+        usb_stack_stop();
+        return err;
+    }
+    msc_host_device_info_t info;
+    if (msc_host_get_device_info(s_msc_dev, &info) == ESP_OK) {
+        s_usb_capacity = (uint64_t)info.sector_size * info.sector_count;
+        ESP_LOGI(TAG, "clé USB %04X:%04X, %" PRIu64 " Mo, secteurs de %" PRIu32 " octets", info.idVendor,
+                 info.idProduct, s_usb_capacity / 1000000u, info.sector_size);
+    }
+    const esp_vfs_fat_mount_config_t mount_cfg = {
+        .format_if_mount_failed = false,    /* jamais de formatage */
+        .max_files = MAX_FILES_OPEN,
+        .allocation_unit_size = 0,
+    };
+    err = msc_host_vfs_register(s_msc_dev, NID_SD_MOUNT_POINT, &mount_cfg, &s_msc_vfs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "système de fichiers de la clé USB illisible (FAT32 attendu) : %s", esp_err_to_name(err));
+        msc_host_uninstall_device(s_msc_dev);
+        s_msc_dev = NULL;
+        s_msc_vfs = NULL;
+        usb_stack_stop();
+        return err;
+    }
+    s_medium = NID_STORAGE_MEDIUM_USB;
+    s_mounted = true;
+    ESP_LOGI(TAG, "clé USB montée en %lld ms", (long long)((esp_timer_get_time() - t0) / 1000));
+    return ESP_OK;
+}
+
+static esp_err_t unmount_usb(void)
+{
+    if (s_msc_vfs != NULL) {
+        if (msc_host_vfs_unregister(s_msc_vfs) != ESP_OK) {
+            ESP_LOGW(TAG, "démontage du système de fichiers USB");
+        }
+        s_msc_vfs = NULL;
+    }
+    if (s_msc_dev != NULL) {
+        msc_host_uninstall_device(s_msc_dev);
+        s_msc_dev = NULL;
+    }
+    usb_stack_stop();
+    ESP_LOGI(TAG, "clé USB démontée, 5 V USB %s", nid_board_pins()->usb_vbus != GPIO_NUM_NC ? "coupé" : "permanent");
+    return ESP_OK;
+}
+
+#endif /* NID_STORAGE_HAS_USB */
+
+/* ------------------------------------------------------------------------- */
+/* Montage                                                                    */
+/* ------------------------------------------------------------------------- */
+
+/** Monte le support choisi dans menuconfig (verrou fichiers pris). */
+static esp_err_t mount_medium(void)
+{
+    esp_err_t err;
+#if CONFIG_NID_STORAGE_USB
+    err = mount_usb(CONFIG_NID_USB_CONNECT_TIMEOUT_MS);
+#elif CONFIG_NID_STORAGE_AUTO
+    err = mount_usb(CONFIG_NID_USB_CONNECT_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "pas de clé USB : carte microSD");
+        err = mount_card();
+    }
+#else
+    err = mount_card();
+#endif
+    if (err != ESP_OK) {
+        return err;
+    }
+    log_volume();
+    /* Identifiants déjà connus (remontage après une pause) : le support a pu être remplacé. */
     char base[BASE_DIR_MAX];
     if (snapshot_ids(base, sizeof(base), NULL, NULL)) {
         ensure_dir(base);
@@ -242,7 +570,7 @@ esp_err_t nid_storage_mount(void)
 {
     SemaphoreHandle_t lock = fs_lock();
     xSemaphoreTake(lock, portMAX_DELAY);
-    const esp_err_t err = s_mounted ? ESP_OK : mount_card();
+    const esp_err_t err = s_mounted ? ESP_OK : mount_medium();
     xSemaphoreGive(lock);
     return err;
 }
@@ -252,34 +580,73 @@ esp_err_t nid_storage_unmount(void)
     SemaphoreHandle_t lock = fs_lock();
     xSemaphoreTake(lock, portMAX_DELAY);
     esp_err_t err = ESP_OK;
-    if (s_card != NULL) {
-        s_mounted = false;
-        err = esp_vfs_fat_sdcard_unmount(NID_SD_MOUNT_POINT, s_card);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "démontage de la carte SD : %s", esp_err_to_name(err));
-        } else {
-            ESP_LOGI(TAG, "carte SD démontée");
-        }
-        s_card = NULL;
+    s_mounted = false;
+#if NID_STORAGE_HAS_USB
+    if (s_medium == NID_STORAGE_MEDIUM_USB) {
+        err = unmount_usb();
+    } else
+#endif
+    {
+        err = unmount_card();
     }
-    release_power();    /* coupe le LDO : le domaine d'E/S de la carte n'est plus alimenté */
+    s_medium = NID_STORAGE_MEDIUM_NONE;
     xSemaphoreGive(lock);
     return err;
 }
 
 bool nid_storage_is_mounted(void)
 {
+#if NID_STORAGE_HAS_USB
+    if (s_medium == NID_STORAGE_MEDIUM_USB && s_usb_lost) {
+        return false;
+    }
+#endif
     return s_mounted;
 }
 
+nid_storage_medium_t nid_storage_medium(void)
+{
+    return s_mounted ? s_medium : NID_STORAGE_MEDIUM_NONE;
+}
+
+const char *nid_storage_medium_str(void)
+{
+    switch (nid_storage_medium()) {
+    case NID_STORAGE_MEDIUM_SD:
+        return "carte SD";
+    case NID_STORAGE_MEDIUM_USB:
+        return "clé USB";
+    default:
+        return "aucun";
+    }
+}
+
 /**
- * Volume FAT de la carte (verrou fichiers pris, carte montée) : f_getfree sur le
- * lecteur de la carte, tailles calculées en 64 bits (nid_storage_calc.h).
+ * Volume FAT monté (verrou fichiers pris) : carte SD, f_getfree sur le lecteur
+ * de la carte, tailles calculées en 64 bits (nid_storage_calc.h) ; clé USB,
+ * esp_vfs_fat_info.
  */
 static esp_err_t read_volume(nid_storage_volume_t *v, bool full_scan)
 {
     memset(v, 0, sizeof(*v));
-    if (!s_mounted || s_card == NULL) {
+    if (!s_mounted) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    v->medium = s_medium;
+#if NID_STORAGE_HAS_USB
+    if (s_medium == NID_STORAGE_MEDIUM_USB) {
+        uint64_t total = 0, free_b = 0;
+        const esp_err_t err = esp_vfs_fat_info(NID_SD_MOUNT_POINT, &total, &free_b);
+        if (err != ESP_OK) {
+            return err;
+        }
+        v->volume_bytes = total;
+        v->free_bytes = free_b;
+        v->card_bytes = s_usb_capacity;
+        return ESP_OK;
+    }
+#endif
+    if (s_card == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     const BYTE pdrv = ff_diskio_get_pdrv_card(s_card);
@@ -290,8 +657,8 @@ static esp_err_t read_volume(nid_storage_volume_t *v, bool full_scan)
     FATFS *fs = NULL;
     DWORD free_clst = 0;
     FRESULT res = f_getfree(drv, &free_clst, &fs);
-    if (res == FR_OK && full_scan) {
-        /* Compteur FSINFO ignoré : recomptage complet de la FAT (corrige aussi FSINFO). */
+    if (res == FR_OK && (full_scan || free_clst > fs->n_fatent - 2)) {
+        /* Compteur FSINFO ignoré (ou invraisemblable) : recomptage complet de la FAT. */
         fs->free_clst = 0xFFFFFFFF;
         res = f_getfree(drv, &free_clst, &fs);
     }
@@ -338,20 +705,31 @@ esp_err_t nid_storage_get_space(uint64_t *total_bytes, uint64_t *free_bytes)
     return err;
 }
 
-/** Journal série du volume monté ; alerte si le volume FAT ne couvre pas la carte. */
+/**
+ * Journal série du volume monté ; si le volume FAT ne couvre pas la carte,
+ * description de la table de partitions (cause habituelle : carte de
+ * Raspberry Pi, « 42 Mo libres » sur une carte de 120 Go au banc du 14/10).
+ */
 static void log_volume(void)
 {
     nid_storage_volume_t v;
     if (read_volume(&v, false) != ESP_OK) {
         return;
     }
-    ESP_LOGI(TAG, "volume FAT%u : %" PRIu64 " Mo dont %" PRIu64 " Mo libres, grappes de %" PRIu32 " ko, "
-             "début secteur %" PRIu32 " ; carte %" PRIu64 " Mo", v.fat_type, v.volume_bytes / 1000000ULL,
-             v.free_bytes / 1000000ULL, v.cluster_bytes / 1024u, v.first_sector, v.card_bytes / 1000000ULL);
+    if (v.medium == NID_STORAGE_MEDIUM_USB) {
+        ESP_LOGI(TAG, "volume FAT de la clé USB : %" PRIu64 " Mo dont %" PRIu64 " Mo libres ; clé %" PRIu64 " Mo",
+                 v.volume_bytes / 1000000ULL, v.free_bytes / 1000000ULL, v.card_bytes / 1000000ULL);
+    } else {
+        ESP_LOGI(TAG, "volume FAT%u : %" PRIu64 " Mo dont %" PRIu64 " Mo libres, grappes de %" PRIu32 " ko, "
+                 "début secteur %" PRIu32 " ; carte %" PRIu64 " Mo", v.fat_type, v.volume_bytes / 1000000ULL,
+                 v.free_bytes / 1000000ULL, v.cluster_bytes / 1024u, v.first_sector, v.card_bytes / 1000000ULL);
+    }
     if (nid_fat_volume_too_small(v.volume_bytes, v.card_bytes)) {
-        ESP_LOGW(TAG, "le volume FAT monté (%" PRIu64 " Mo) ne couvre qu'une partie de la carte (%" PRIu64 " Mo) : "
-                 "carte à plusieurs partitions (seule la première partition FAT est utilisée) ? "
-                 "La reformater en une seule partition FAT32", v.volume_bytes / 1000000ULL, v.card_bytes / 1000000ULL);
+        ESP_LOGW(TAG, "le volume FAT monté (%" PRIu64 " Mo) ne couvre qu'une partie du support (%" PRIu64 " Mo)",
+                 v.volume_bytes / 1000000ULL, v.card_bytes / 1000000ULL);
+        if (v.medium == NID_STORAGE_MEDIUM_SD) {
+            log_partitions(s_card);
+        }
     }
 }
 
@@ -412,12 +790,16 @@ esp_err_t nid_storage_media_begin(nid_media_kind_t kind, time_t ts, uint32_t seq
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Dossier du jour, en heure locale. */
+    /* Dossier du jour, en heure locale. Heure perdue (avant 2025) : dossier et noms
+     * « SANSHEURE » plutôt qu'une date fausse (1969-12-31 au banc du 14/10). */
     struct tm tm;
     localtime_r(&ts, &tm);
     char day[12];
     char hms[8];
-    if (strftime(day, sizeof(day), "%Y%m%d", &tm) == 0 || strftime(hms, sizeof(hms), "%H%M%S", &tm) == 0) {
+    if ((int64_t)ts < TIME_VALID_MIN_UTC) {
+        strlcpy(day, "SANSHEURE", sizeof(day));
+        strlcpy(hms, "000000", sizeof(hms));
+    } else if (strftime(day, sizeof(day), "%Y%m%d", &tm) == 0 || strftime(hms, sizeof(hms), "%H%M%S", &tm) == 0) {
         return ESP_FAIL;
     }
     char dir[BASE_DIR_MAX + 12];

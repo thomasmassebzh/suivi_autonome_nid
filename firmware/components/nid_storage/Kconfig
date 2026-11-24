@@ -1,0 +1,40 @@
+menu "Suivi nid — Stockage"
+
+    choice NID_STORAGE_MEDIUM
+        prompt "Support des vidéos, photos et du journal"
+        default NID_STORAGE_SD
+        help
+            Le support est monté sous /sdcard dans tous les cas (config.ini,
+            dossiers <SYS>_<NID>, journal.csv) ; formaté en FAT32, jamais
+            reformaté par le firmware.
+
+        config NID_STORAGE_SD
+            bool "Carte microSD"
+        config NID_STORAGE_USB
+            bool "Clé ou disque USB (hôte USB 2.0 de l'ESP32-P4)"
+            help
+                Clé, carte SD dans un lecteur USB, ou disque SSD USB, au bout
+                d'un câble USB 2.0 de 5 m au plus (clé et batterie au pied de
+                l'arbre). Prévoir un interrupteur sur le 5 V USB (broche
+                « interrupteur du 5 V USB » du menu « Carte et brochage ») :
+                une clé consomme 20 à 100 mA au repos.
+        config NID_STORAGE_AUTO
+            bool "Clé USB si elle est branchée, sinon carte microSD"
+            help
+                Chaque montage commence par chercher une clé USB (au plus le
+                délai ci-dessous) : à réserver au banc d'essai, le délai
+                s'ajoute au temps de réaction du terrain.
+    endchoice
+
+    config NID_USB_CONNECT_TIMEOUT_MS
+        int "Délai maximal de détection de la clé USB (ms)"
+        depends on NID_STORAGE_USB || NID_STORAGE_AUTO
+        range 300 20000
+        default 1500 if NID_STORAGE_AUTO
+        default 5000
+        help
+            Temps laissé à la clé pour démarrer et s'énumérer après la mise
+            sous tension du 5 V USB (une clé courante répond en 0,3 à 1 s,
+            certains disques en plus de 2 s).
+
+endmenu

@@ -10,6 +10,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "nid_storage_calc.h"
 
@@ -50,6 +51,36 @@ int main(void)
     CHECK(nid_fat_volume_too_small(44040192ULL, 127865454592ULL), "petite partition détectée");
     CHECK(!nid_fat_volume_too_small(119983210496ULL, 120000000000ULL), "volume = carte");
     CHECK(!nid_fat_volume_too_small(1000, 0), "capacité de la carte inconnue");
+
+    /* Table MBR d'une carte de Raspberry Pi : petite partition FAT + partition Linux. */
+    uint8_t s0[512];
+    memset(s0, 0, sizeof(s0));
+    s0[510] = 0x55;
+    s0[511] = 0xAA;
+    uint8_t *e = s0 + 446;
+    e[4] = 0x0C;                                    /* FAT32 LBA, 42 Mo à partir du secteur 8192 */
+    e[8] = 0x00; e[9] = 0x20;                       /* 8192 */
+    e[12] = 0x00; e[13] = 0x50; e[14] = 0x01;       /* 86016 secteurs */
+    e += 16;
+    e[4] = 0x83;                                    /* Linux, 119 Go */
+    e[8] = 0x00; e[9] = 0x70; e[10] = 0x01;         /* 94208 */
+    e[12] = 0x00; e[13] = 0x00; e[14] = 0x00; e[15] = 0x0E;   /* 234881024 secteurs */
+    nid_mbr_part_t p[4];
+    const int n = nid_mbr_parse(s0, p);
+    CHECK(n == 2, "deux partitions (obtenu %d)", n);
+    CHECK(p[0].type == 0x0C && p[0].lba_start == 8192 && p[0].sectors == 86016, "partition FAT");
+    CHECK(p[1].type == 0x83 && p[1].sectors == 234881024u, "partition Linux");
+    CHECK(nid_mbr_is_fat(p[0].type) && !nid_mbr_is_fat(p[1].type) && !nid_mbr_is_fat(0x07), "types FAT");
+    CHECK(strcmp(nid_mbr_type_name(0x07), "exFAT ou NTFS") == 0, "nom exFAT");
+    /* Secteur de démarrage FAT32 (carte formatée sans table de partitions) */
+    memset(s0, 0, sizeof(s0));
+    s0[0] = 0xEB; s0[1] = 0x58; s0[2] = 0x90;
+    memcpy(s0 + 82, "FAT32   ", 8);
+    s0[510] = 0x55;
+    s0[511] = 0xAA;
+    CHECK(nid_mbr_parse(s0, p) == -1, "volume sans table de partitions");
+    s0[511] = 0x00;
+    CHECK(nid_mbr_parse(s0, p) == -1, "signature absente");
 
     printf("%d vérification(s) réussie(s), %d échec(s)\n", s_ok, s_fail);
     return s_fail ? 1 : 0;

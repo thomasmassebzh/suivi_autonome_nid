@@ -1,0 +1,4 @@
+# Stockage sur clé ou disque USB (hôte USB 2.0 de l'ESP32-P4) au lieu de la carte microSD.
+# Câble USB 2.0 de 5 m au plus. Renseigner la broche de l'interrupteur du 5 V USB
+# (menu « Suivi nid — Carte et brochage ») pour couper la clé entre deux événements.
+CONFIG_NID_STORAGE_USB=y

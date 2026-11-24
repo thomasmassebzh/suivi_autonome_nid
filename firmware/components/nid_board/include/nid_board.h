@@ -54,7 +54,12 @@ typedef struct {
     gpio_num_t cam_pwdn;
     gpio_num_t i2s_mclk, i2s_bclk, i2s_ws, i2s_dout, i2s_din;
     gpio_num_t sd_clk, sd_cmd, sd_d0, sd_d1, sd_d2, sd_d3;
+    gpio_num_t sd_power;       /*!< Interrupteur d'alimentation de la carte SD (Waveshare : GPIO45, actif bas) */
+    gpio_num_t usb_vbus;       /*!< Interrupteur du 5 V du connecteur USB hôte (stockage USB) */
 } nid_board_pins_t;
+
+/** Nom de la carte choisie dans menuconfig (journal, page d'installation). */
+const char *nid_board_name(void);
 
 /** Brochage issu du menuconfig. */
 const nid_board_pins_t *nid_board_pins(void);
@@ -98,10 +103,23 @@ void nid_board_status_led(bool on);
 void nid_board_status_blink(int count, int on_ms, int off_ms);
 
 /**
+ * Alimentation de la carte microSD par son interrupteur (Waveshare). Sans
+ * interrupteur configuré : sans effet, retourne false. La broche est dans le
+ * domaine d'E/S de l'emplacement SD : appeler après l'activation du LDO VO4.
+ */
+bool nid_board_sd_power(bool on);
+
+/**
+ * 5 V du connecteur USB hôte (clé ou disque de stockage). Sans interrupteur
+ * configuré : sans effet, retourne false (5 V permanent).
+ */
+bool nid_board_usb_vbus(bool on);
+
+/**
  * Prépare les broches avant la veille profonde (ou un redémarrage logiciel) :
  * sorties au repos, sans tirage, reprises aux périphériques (LEDC...) et
  * maintenues : LED IR éteintes, voyant éteint, C6 en reset, rétroéclairage et
- * ampli coupés, OFF inactif. Les entrées de réveil ne sont jamais maintenues
+ * ampli coupés, OFF inactif, carte SD et 5 V USB coupés. Les entrées de réveil ne sont jamais maintenues
  * en sortie (nid_power les configure pour la veille).
  */
 void nid_board_prepare_deep_sleep(void);

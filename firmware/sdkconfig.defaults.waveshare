@@ -1,0 +1,18 @@
+# Carte Waveshare ESP32-P4-WIFI6 (et cartes Waveshare ESP32-P4 + C6 au même brochage)
+#
+# À ajouter après sdkconfig.defaults (voir README, « Carte Waveshare ») :
+#   idf.py -B build_waveshare -D SDKCONFIG=build_waveshare/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.waveshare" build
+# Puce rév. 1.x (esptool chip-id) : ajouter aussi sdkconfig.defaults.rev1.
+# Pile RTC rechargeable en place : ajouter sdkconfig.defaults.vbat.
+
+# Brochage par défaut de la carte (SD alimentée par GPIO45, pas d'écran ni de voyant)
+CONFIG_NID_BOARD_WAVESHARE_P4_WIFI6=y
+
+# Coprocesseur C6 en SDIO sur les mêmes broches que la P4X (CLK 18, CMD 19,
+# D0-D3 14-17, reset GPIO54) : le réglage « Function-EV-Board » d'ESP-Hosted convient.
+CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
+
+# Quartz 32 kHz : si la carte n'en a pas, ESP-IDF bascule sur l'oscillateur RC
+# interne au démarrage ; nid_clock le signale (« interne (oscillateur RC) »).
+CONFIG_RTC_CLK_SRC_EXT_CRYS=y
