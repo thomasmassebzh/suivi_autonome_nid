@@ -274,6 +274,21 @@ static bool demarrer(bool premier)
     if (premier) {
         lire_version_c6();
     }
+    /* Serveur web et aperçu : jamais démarrés pendant un enregistrement. Leurs tâches,
+     * sockets et moteur JPEG prennent de la mémoire interne dont l'encodeur et le
+     * pilote SD ont besoin (échec d'écriture au banc du 27/11, au démarrage de la vue). */
+    for (bool annonce = false;;) {
+        banc_etat_t e;
+        banc_etat_lire(&e);
+        if (!e.rec) {
+            break;
+        }
+        if (!annonce) {
+            ESP_LOGI(TAG, "serveur web : démarrage après l'enregistrement en cours");
+            annonce = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
     err = banc_web_demarrer();
     portENTER_CRITICAL(&s_mux);
     s_etat.web = (err == ESP_OK);

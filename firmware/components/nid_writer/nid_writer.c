@@ -7,26 +7,41 @@
  *   nid_writer_open / nid_writer_close : opérations synchrones (attente du résultat)
  *
  * Consommateur (tâche « nid_ecriture ») : traite les opérations dans l'ordre.
- * Les écritures sont regroupées dans un tampon de transfert en mémoire interne
- * alignée (DMA de la carte SD, transferts USB) : la place est libérée dans le
- * tampon circulaire dès la copie, et le support ne reçoit que des blocs de
- * 16 ko (ou ce qui est en attente avant un déplacement, une fermeture, ou après
- * FLUSH_IDLE_MS sans nouvelle donnée). Le multiplexeur MP4 n'a donc plus besoin
- * de son propre cache en mémoire interne (32 ko qui manquaient au banc).
  *
- * Comptabilité du tampon : `used` (octets en attente) n'est modifié que sous la
- * section critique `mux` ; `head` n'est touché que par le producteur, `tail`
- * que par le consommateur. Un producteur ne copie que dans la zone libre, le
- * consommateur ne lit que la zone occupée : les copies se font hors section
- * critique.
+ * Écritures alignées sur le secteur (correctif du 27/11) : l'octet de position P
+ * du fichier est toujours rangé à l'adresse bounce + (P % 512) + n × 512 du
+ * tampon de transfert. Lors d'un write(), FatFs complète le secteur entamé dans
+ * son propre tampon, puis envoie les secteurs entiers DIRECTEMENT depuis notre
+ * tampon (ff.c, f_write) : l'adresse est alors alignée sur 512, donc sur la
+ * ligne de cache (64 o en interne, 128 o en PSRAM), et le pilote SDMMC fait un
+ * DMA direct, sans copie ni allocation. Le reste (< 512 o) est gardé et ramené
+ * en tête du tampon. Avant ce correctif, une vidange « au repos » laissait la
+ * position fichier non alignée : le pilote réservait alors une copie en mémoire
+ * interne à chaque écriture (allocate_dma_buf), qui manquait au banc une fois
+ * l'encodeur H.264, l'écran et le Wi-Fi démarrés (sdmmc_cmd.c, « not enough mem »).
+ *
+ * Sur l'ESP32-P4, le contrôleur SDMMC sait faire du DMA depuis la PSRAM
+ * (SOC_SDMMC_PSRAM_DMA_CAPABLE) si l'adresse et la longueur sont alignées sur
+ * 128 o : le tampon de transfert (64 ko, aligné sur 128) est en PSRAM et ne
+ * prend plus aucune mémoire interne. Il est réservé à l'ouverture du fichier,
+ * comme le tampon circulaire, donc après l'encodeur. Option
+ * CONFIG_NID_WRITER_BOUNCE_INTERNAL : tampon de transfert en mémoire interne
+ * DMA, réservé à la création (pour une clé USB si son pilote l'exige).
+ *
+ * Comptabilité du tampon circulaire : `used` (octets en attente) n'est modifié
+ * que sous la section critique `mux` ; `head` n'est touché que par le
+ * producteur, `tail` que par le consommateur. Les copies se font hors section
+ * critique (zones disjointes).
  */
 #include "nid_writer.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
@@ -43,17 +58,19 @@
 
 static const char *TAG = "nid_writer";
 
-#define OP_QUEUE_LEN        1024            /* file en PSRAM : sans multiplexeur caché, une écriture par paquet */
-#define BOUNCE_SIZE         (16 * 1024)     /* tampon de transfert, mémoire interne DMA alignée */
-#define BOUNCE_SIZE_MIN     (4 * 1024)
-#define FLUSH_IDLE_MS       50              /* données en attente écrites après ce délai sans nouvelle donnée */
-#define BOUNCE_ALIGN        64
-#define MAX_CHUNK           (64 * 1024)     /* morceau maximal copié d'un coup dans le tampon */
-#define FALLBACK_RING_SIZE  (256 * 1024)    /* sans PSRAM */
+#define OP_QUEUE_LEN        1024            /* file en PSRAM : une opération par écriture du multiplexeur */
+#define SECTOR              512u
+#define BOUNCE_SIZE         (64 * 1024)     /* tampon de transfert : écritures de 128 secteurs */
+#define BOUNCE_SIZE_INT     (16 * 1024)     /* variante en mémoire interne (option) */
+#define BOUNCE_ALIGN        128             /* ≥ ligne de cache L2 PSRAM (128) et L1 interne (64) */
+#define MAX_CHUNK           (64 * 1024)     /* morceau maximal copié d'un coup dans le tampon circulaire */
 #define OPEN_TIMEOUT_MS     5000
 #define QUIT_TIMEOUT_MS     2000
 #define TASK_STACK          4096
 #define PATH_MAX_LEN        192
+
+_Static_assert(BOUNCE_SIZE % SECTOR == 0 && BOUNCE_SIZE_INT % SECTOR == 0, "tampon de transfert en secteurs entiers");
+_Static_assert(SECTOR % BOUNCE_ALIGN == 0, "secteur multiple de l'alignement DMA");
 
 typedef enum {
     OP_OPEN = 0,
@@ -66,13 +83,14 @@ typedef enum {
 typedef struct {
     uint8_t  type;
     uint32_t len;
+    uint32_t seq;       /* opérations synchrones : numéro attendu en retour */
     uint64_t pos;
 } op_t;
 
 struct nid_writer {
     uint8_t          *ring;
     size_t            cap;
-    size_t            want;         /* taille demandée du tampon circulaire (alloué à l'ouverture) */
+    size_t            want;         /* taille demandée du tampon circulaire (réservé à l'ouverture) */
     size_t            head;         /* producteur seulement */
     size_t            tail;         /* consommateur seulement */
     size_t            used;         /* sous mux */
@@ -81,17 +99,20 @@ struct nid_writer {
 
     uint8_t          *bounce;
     size_t            bounce_size;
-    size_t            bounce_fill;  /* consommateur seulement : octets en attente d'écriture */
+    size_t            lead;         /* consommateur : position fichier % 512 du premier octet en attente */
+    size_t            bounce_fill;  /* consommateur : octets en attente dans le tampon de transfert */
 
     QueueHandle_t     ops;
     SemaphoreHandle_t space;        /* donné par le consommateur après chaque libération */
     SemaphoreHandle_t done;         /* donné après OPEN, CLOSE, QUIT */
     TaskHandle_t      task;
-    bool              task_alive;
+    volatile bool     task_alive;
+    uint32_t          seq;          /* producteur : dernier numéro d'opération synchrone */
+    volatile uint32_t done_seq;     /* consommateur : numéro de la dernière opération synchrone traitée */
 
-    FILE             *f;
+    int               fd;
     char              path[PATH_MAX_LEN];
-    esp_err_t         result;       /* résultat de la dernière opération synchrone */
+    volatile esp_err_t result;      /* résultat de la dernière opération synchrone */
     volatile bool     error;
 
     int64_t           stall_us;
@@ -103,73 +124,109 @@ struct nid_writer {
 /* Tâche d'écriture                                                           */
 /* ------------------------------------------------------------------------- */
 
-static void set_error(nid_writer_t *w, const char *what)
+static void set_error(nid_writer_t *w, const char *what, int err)
 {
     if (!w->error) {
-        ESP_LOGE(TAG, "%s : %s (errno %d)", what, w->path, errno);
+        ESP_LOGE(TAG, "%s : %s (errno %d)", what, w->path, err);
     }
     w->error = true;
 }
 
-/** Écrit sur le support ce qui attend dans le tampon de transfert. */
-static void flush_bounce(nid_writer_t *w)
+static bool write_all(int fd, const uint8_t *p, size_t n, int *err)
 {
-    const size_t m = w->bounce_fill;
-    w->bounce_fill = 0;
-    if (m == 0 || w->error || w->f == NULL) {
-        return;     /* après une erreur : données consommées, plus écrites */
+    while (n > 0) {
+        const ssize_t r = write(fd, p, n);
+        if (r <= 0) {
+            *err = errno;
+            return false;
+        }
+        p += r;
+        n -= (size_t)r;
     }
-    const int64_t t0 = esp_timer_get_time();
-    const size_t n = fwrite(w->bounce, 1, m, w->f);
-    const uint32_t dt_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
-    if (dt_ms > w->slowest_ms) {
-        w->slowest_ms = dt_ms;
+    return true;
+}
+
+/**
+ * Écrit ce qui attend dans le tampon de transfert.
+ * all = false : jusqu'à la dernière frontière de secteur seulement ; le reste
+ * (< 512 o) est ramené en tête du tampon, à l'adresse alignée correspondante.
+ * all = true : tout (avant un déplacement ou la fermeture).
+ */
+static void flush_bounce(nid_writer_t *w, bool all)
+{
+    const size_t start = w->lead;
+    const size_t end = w->lead + w->bounce_fill;
+    const size_t stop = all ? end : (end & ~(size_t)(SECTOR - 1));
+    if (stop <= start) {
+        return;
     }
-    if (n != m) {
-        set_error(w, "écriture impossible (support plein ou retiré ?)");
-    } else {
-        w->bytes += m;
+    if (!w->error && w->fd >= 0) {
+        const int64_t t0 = esp_timer_get_time();
+        int err = 0;
+        if (!write_all(w->fd, w->bounce + start, stop - start, &err)) {
+            set_error(w, "écriture impossible (support plein ou retiré ?)", err);
+        } else {
+            w->bytes += stop - start;
+        }
+        const uint32_t dt_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+        if (dt_ms > w->slowest_ms) {
+            w->slowest_ms = dt_ms;
+        }
     }
+    const size_t rest = end - stop;                 /* 0 si all */
+    if (rest > 0) {
+        memmove(w->bounce, w->bounce + stop, rest); /* stop multiple de 512 : le reste commence un secteur */
+    }
+    w->lead = all ? (stop % SECTOR) : 0;
+    w->bounce_fill = rest;
 }
 
 static void consume_write(nid_writer_t *w, size_t len)
 {
     while (len > 0) {
-        const size_t room = w->bounce_size - w->bounce_fill;
+        const size_t room = w->bounce_size - (w->lead + w->bounce_fill);
+        if (room == 0) {
+            flush_bounce(w, false);
+            continue;
+        }
         const size_t m = len < room ? len : room;
-        w->tail = nid_ring_copy_out(w->ring, w->cap, w->tail, w->bounce + w->bounce_fill, m);
+        w->tail = nid_ring_copy_out(w->ring, w->cap, w->tail, w->bounce + w->lead + w->bounce_fill, m);
         portENTER_CRITICAL(&w->mux);
         w->used -= m;
         portEXIT_CRITICAL(&w->mux);
         xSemaphoreGive(w->space);       /* place libérée : le producteur peut continuer */
         w->bounce_fill += m;
         len -= m;
-        if (w->bounce_fill == w->bounce_size) {
-            flush_bounce(w);
-        }
     }
 }
 
 static esp_err_t do_close(nid_writer_t *w)
 {
-    if (w->f == NULL) {
+    if (w->fd < 0) {
         return ESP_ERR_INVALID_STATE;
     }
+    flush_bounce(w, true);
     bool ok = true;
-    if (fflush(w->f) != 0) {
+    int err = 0;
+    if (fsync(w->fd) != 0) {
         ok = false;
+        err = errno;
     }
-    if (fsync(fileno(w->f)) != 0) {
+    if (close(w->fd) != 0 && ok) {
         ok = false;
+        err = errno;
     }
-    if (fclose(w->f) != 0) {
-        ok = false;
-    }
-    w->f = NULL;
+    w->fd = -1;
     if (!ok) {
-        set_error(w, "fermeture impossible");
+        set_error(w, "fermeture impossible", err);
     }
     return (ok && !w->error) ? ESP_OK : ESP_FAIL;
+}
+
+static void sync_done(nid_writer_t *w, uint32_t seq)
+{
+    w->done_seq = seq;
+    xSemaphoreGive(w->done);
 }
 
 static void writer_task(void *arg)
@@ -177,54 +234,51 @@ static void writer_task(void *arg)
     nid_writer_t *w = (nid_writer_t *)arg;
     op_t op;
     for (;;) {
-        const TickType_t wait = w->bounce_fill > 0 ? pdMS_TO_TICKS(FLUSH_IDLE_MS) : portMAX_DELAY;
-        if (xQueueReceive(w->ops, &op, wait) != pdTRUE) {
-            flush_bounce(w);            /* plus rien n'arrive : ce qui attend part sur le support */
+        if (xQueueReceive(w->ops, &op, portMAX_DELAY) != pdTRUE) {
             continue;
-        }
-        if (op.type != OP_WRITE) {
-            flush_bounce(w);            /* l'ordre des écritures et des déplacements est conservé */
         }
         switch (op.type) {
         case OP_OPEN:
-            if (w->f != NULL) {
-                fclose(w->f);
+            if (w->fd >= 0) {
+                close(w->fd);
             }
             w->error = false;
+            w->lead = 0;
             w->bounce_fill = 0;
-            w->f = fopen(w->path, "wb");
-            if (w->f == NULL) {
-                set_error(w, "création impossible");
+            w->fd = open(w->path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (w->fd < 0) {
+                set_error(w, "création impossible", errno);
                 w->result = ESP_FAIL;
             } else {
-                /* Écritures par blocs de BOUNCE_SIZE : pas de tampon newlib supplémentaire. */
-                setvbuf(w->f, NULL, _IONBF, 0);
                 w->result = ESP_OK;
             }
-            xSemaphoreGive(w->done);
+            sync_done(w, op.seq);
             break;
         case OP_WRITE:
             consume_write(w, op.len);
             break;
         case OP_SEEK:
-            if (!w->error && w->f != NULL) {
-                if (op.pos > (uint64_t)INT32_MAX || fseek(w->f, (long)op.pos, SEEK_SET) != 0) {
-                    set_error(w, "déplacement impossible");
+            flush_bounce(w, true);      /* ordre des écritures et des déplacements conservé */
+            if (!w->error && w->fd >= 0) {
+                if (op.pos > (uint64_t)INT32_MAX || lseek(w->fd, (off_t)op.pos, SEEK_SET) < 0) {
+                    set_error(w, "déplacement impossible", errno);
                 }
             }
+            w->lead = (size_t)(op.pos % SECTOR);
             break;
         case OP_CLOSE:
             w->result = do_close(w);
-            xSemaphoreGive(w->done);
+            sync_done(w, op.seq);
             break;
         case OP_QUIT:
         default:
-            if (w->f != NULL) {
-                fclose(w->f);
-                w->f = NULL;
+            if (w->fd >= 0) {
+                close(w->fd);
+                w->fd = -1;
             }
             w->task_alive = false;
-            xSemaphoreGive(w->done);
+            w->result = ESP_OK;
+            sync_done(w, op.seq);
             vTaskDelete(NULL);
             return;
         }
@@ -260,39 +314,30 @@ esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out)
     if (buffer_bytes == 0) {
         buffer_bytes = (size_t)CONFIG_NID_WRITER_BUFFER_KB * 1024u;
     }
-    nid_writer_t *w = calloc(1, sizeof(*w));
+    nid_writer_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (w == NULL) {
         return ESP_ERR_NO_MEM;
     }
     portMUX_INITIALIZE(&w->mux);
     w->want = buffer_bytes;
+    w->fd = -1;
 
-    /* Tampon de transfert en mémoire interne capable de DMA : le pilote SD (ou USB)
-     * écrit directement depuis lui. En PSRAM, le pilote SD alloue à chaque écriture
-     * une copie en mémoire interne, qui manquait au banc une fois l'encodeur H.264
-     * démarré (« allocate_dma_buf: not enough mem »). À créer AVANT l'encodeur ;
-     * le grand tampon circulaire en PSRAM n'est réservé qu'à l'ouverture du
-     * fichier, APRÈS l'encodeur (ses images de référence d'abord). */
-    for (size_t sz = BOUNCE_SIZE; sz >= BOUNCE_SIZE_MIN && w->bounce == NULL; sz /= 2) {
-        w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-        w->bounce_size = sz;
-    }
+#if CONFIG_NID_WRITER_BOUNCE_INTERNAL
+    /* Option : tampon de transfert en mémoire interne DMA, réservé maintenant (avant l'encodeur). */
+    w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, BOUNCE_SIZE_INT, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    w->bounce_size = BOUNCE_SIZE_INT;
     if (w->bounce == NULL) {
         ESP_LOGE(TAG, "mémoire interne (DMA) insuffisante pour le tampon de transfert");
         free(w);
         return ESP_ERR_NO_MEM;
     }
-    if (w->bounce_size < BOUNCE_SIZE) {
-        ESP_LOGW(TAG, "tampon de transfert réduit à %u ko (mémoire interne)", (unsigned)(w->bounce_size / 1024));
-    }
-    /* File d'opérations en PSRAM : 16 ko qui manqueraient en mémoire interne. */
+#endif
+
+    /* File d'opérations en PSRAM : 24 ko qui manqueraient en mémoire interne. */
     w->ops = xQueueCreateWithCaps(OP_QUEUE_LEN, sizeof(op_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (w->ops == NULL) {
-        w->ops = xQueueCreateWithCaps(OP_QUEUE_LEN / 8, sizeof(op_t), MALLOC_CAP_8BIT);
-    }
     w->space = xSemaphoreCreateBinary();
     w->done = xSemaphoreCreateBinary();
-    if (w->bounce == NULL || w->ops == NULL || w->space == NULL || w->done == NULL) {
+    if (w->ops == NULL || w->space == NULL || w->done == NULL) {
         free_writer(w);
         return ESP_ERR_NO_MEM;
     }
@@ -309,45 +354,60 @@ esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out)
     return ESP_OK;
 }
 
+/**
+ * Opération synchrone : attend que la tâche ait traité CETTE opération (numéro
+ * de séquence), pas seulement qu'un « done » ait été donné : une fermeture
+ * tardive (délai dépassé) ne peut pas faire croire qu'un QUIT a abouti.
+ */
 static esp_err_t run_sync(nid_writer_t *w, uint8_t type, uint32_t timeout_ms)
 {
-    const op_t op = { .type = type };
-    xSemaphoreTake(w->done, 0);
+    const op_t op = { .type = type, .seq = ++w->seq };
     if (xQueueSend(w->ops, &op, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
         w->error = true;
         return ESP_ERR_TIMEOUT;
     }
-    if (xSemaphoreTake(w->done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
-        w->error = true;
-        return ESP_ERR_TIMEOUT;
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (w->done_seq != op.seq) {
+        const TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(deadline - now) <= 0 || xSemaphoreTake(w->done, deadline - now) != pdTRUE) {
+            if (w->done_seq == op.seq) {
+                break;
+            }
+            w->error = true;
+            return ESP_ERR_TIMEOUT;
+        }
     }
     return w->result;
 }
 
-/** Tampon circulaire en PSRAM, réduit par moitiés si la PSRAM est fragmentée. */
-static esp_err_t alloc_ring(nid_writer_t *w)
+/** Tampons en PSRAM, réservés à l'ouverture (après l'encodeur H.264). */
+static esp_err_t alloc_buffers(nid_writer_t *w)
 {
-    if (w->ring != NULL) {
-        return ESP_OK;
+    if (w->bounce == NULL) {
+        w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, BOUNCE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        w->bounce_size = BOUNCE_SIZE;
+        if (w->bounce == NULL) {
+            ESP_LOGE(TAG, "tampon de transfert : PSRAM insuffisante");
+            return ESP_ERR_NO_MEM;
+        }
     }
-    size_t sz = w->want;
-    w->ring = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    while (w->ring == NULL && sz > 512u * 1024u) {
-        sz /= 2;
+    if (w->ring == NULL) {
+        size_t sz = w->want;
         w->ring = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        /* PSRAM fragmentée : tampon réduit par moitiés jusqu'à 512 ko (jamais en mémoire interne). */
+        while (w->ring == NULL && sz > 512u * 1024u) {
+            sz /= 2;
+            w->ring = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+        if (w->ring == NULL) {
+            ESP_LOGE(TAG, "tampon d'écriture : PSRAM insuffisante");
+            return ESP_ERR_NO_MEM;
+        }
+        if (sz < w->want) {
+            ESP_LOGW(TAG, "tampon d'écriture réduit à %u ko (PSRAM fragmentée)", (unsigned)(sz / 1024));
+        }
+        w->cap = sz;
     }
-    if (w->ring == NULL) {
-        sz = FALLBACK_RING_SIZE;
-        w->ring = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
-    }
-    if (w->ring == NULL) {
-        ESP_LOGE(TAG, "tampon d'écriture : mémoire insuffisante");
-        return ESP_ERR_NO_MEM;
-    }
-    if (sz < w->want) {
-        ESP_LOGW(TAG, "tampon d'écriture réduit à %u ko (mémoire fragmentée)", (unsigned)(sz / 1024));
-    }
-    w->cap = sz;
     return ESP_OK;
 }
 
@@ -356,12 +416,12 @@ esp_err_t nid_writer_open(nid_writer_t *w, const char *path)
     if (w == NULL || path == NULL || strlen(path) >= sizeof(w->path)) {
         return ESP_ERR_INVALID_ARG;
     }
-    const esp_err_t aerr = alloc_ring(w);
+    strlcpy(w->path, path, sizeof(w->path));
+    const esp_err_t aerr = alloc_buffers(w);
     if (aerr != ESP_OK) {
         w->error = true;
         return aerr;
     }
-    strlcpy(w->path, path, sizeof(w->path));
     w->head = w->tail = 0;
     portENTER_CRITICAL(&w->mux);
     w->used = 0;
@@ -372,6 +432,11 @@ esp_err_t nid_writer_open(nid_writer_t *w, const char *path)
     w->bytes = 0;
     w->result = ESP_FAIL;
     return run_sync(w, OP_OPEN, OPEN_TIMEOUT_MS);
+}
+
+const char *nid_writer_path(const nid_writer_t *w)
+{
+    return (w != NULL && w->fd >= 0) ? w->path : NULL;
 }
 
 int nid_writer_write(nid_writer_t *w, const void *data, size_t len)
@@ -451,12 +516,10 @@ esp_err_t nid_writer_close(nid_writer_t *w, uint32_t timeout_ms)
     if (w == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    const int64_t t0 = esp_timer_get_time();
     esp_err_t err = run_sync(w, OP_CLOSE, timeout_ms);
     if (err == ESP_ERR_TIMEOUT) {
         ESP_LOGE(TAG, "fermeture de %s : tampon non vidé après %" PRIu32 " ms", w->path, timeout_ms);
     }
-    ESP_LOGD(TAG, "fermeture en %lld ms", (long long)((esp_timer_get_time() - t0) / 1000));
     return err;
 }
 
@@ -492,7 +555,7 @@ void nid_writer_destroy(nid_writer_t *w)
     }
     if (w->task_alive) {
         if (run_sync(w, OP_QUIT, QUIT_TIMEOUT_MS) == ESP_ERR_TIMEOUT && w->task_alive) {
-            /* Tâche bloquée dans une écriture : elle référence le tampon, il n'est pas libéré. */
+            /* Tâche bloquée dans une écriture : elle référence les tampons, ils ne sont pas libérés. */
             ESP_LOGE(TAG, "tâche d'écriture bloquée : %u ko non libérés", (unsigned)(w->cap / 1024));
             return;
         }

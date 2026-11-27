@@ -1,5 +1,14 @@
 menu "Suivi nid — Écriture asynchrone (vidéo)"
 
+    config NID_WRITER_ENABLE
+        bool "Écriture asynchrone de la vidéo (tampon en PSRAM, tâche dédiée)"
+        default y
+        help
+            Oui : le MP4 passe par un tampon en PSRAM vidé par une tâche dédiée ;
+            la caméra n'attend jamais le support. Non : écriture directe depuis
+            la boucle d'enregistrement, avec le cache de 32 ko du multiplexeur
+            en mémoire interne, comme avant le 24/11 (comparaison au banc).
+
     config NID_WRITER_BUFFER_KB
         int "Taille du tampon d'écriture en PSRAM (ko)"
         range 256 16384
@@ -11,6 +20,16 @@ menu "Suivi nid — Écriture asynchrone (vidéo)"
             de quoi absorber les pauses d'une carte SD (nettoyage interne) et le
             montage d'une clé USB. Le tampon n'est alloué que pendant un
             enregistrement.
+
+    config NID_WRITER_BOUNCE_INTERNAL
+        bool "Tampon de transfert en mémoire interne (16 ko) plutôt qu'en PSRAM"
+        default y if NID_STORAGE_USB || NID_STORAGE_AUTO
+        default n
+        help
+            Le contrôleur SD de l'ESP32-P4 écrit directement depuis la PSRAM
+            (tampon aligné sur 128 o) : aucune mémoire interne n'est prise. Le
+            pilote de clé USB n'a pas été vérifié pour la PSRAM : par prudence,
+            tampon en mémoire interne DMA quand le stockage USB est choisi.
 
     config NID_WRITER_STALL_TIMEOUT_MS
         int "Attente maximale quand le tampon est plein (ms)"

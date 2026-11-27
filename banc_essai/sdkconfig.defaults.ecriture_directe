@@ -1,0 +1,6 @@
+# Comparaison au banc : écriture directe de la vidéo, comme avant le 24/11
+# (cache de 32 ko du multiplexeur en mémoire interne, pas de nid_writer).
+#   idf.py -B build_directe -D SDKCONFIG=build_directe/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ecriture_directe" build
+# Ou dans menuconfig : Suivi nid — Écriture asynchrone (vidéo) → décocher la première option.
+CONFIG_NID_WRITER_ENABLE=n

@@ -44,6 +44,12 @@ jobs:
             artefact: banc_essai-esp32p4
             build: build
             defauts: "sdkconfig.defaults"
+          - projet: banc_essai
+            nom: banc_essai-ecriture-directe
+            binaire: banc_essai
+            artefact: banc_essai-ecriture-directe
+            build: build_directe
+            defauts: "sdkconfig.defaults;sdkconfig.defaults.ecriture_directe"
     steps:
       - uses: actions/checkout@v4
 
