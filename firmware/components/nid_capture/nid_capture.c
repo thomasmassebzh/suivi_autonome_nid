@@ -1537,24 +1537,27 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         ESP_LOGW(TAG, "son demandé mais indisponible : vidéo seule");
     }
 
-    log_memory("avant l'encodeur");
-    esp_err_t err = m2m_start(s_cap.h264_fd);
-    bool h264_on = err == ESP_OK;
+    /* Mémoire, dans cet ordre (banc du 27/11) :
+     *  1. écrivain asynchrone : son tampon de transfert de 16 ko en mémoire interne
+     *     DMA, avant que l'encodeur et la caméra ne la prennent presque toute
+     *     (sinon « allocate_dma_buf: not enough mem » du pilote SD) ;
+     *  2. encodeur H.264 : images de référence (≈ 3 Mo d'un bloc en PSRAM) ;
+     *  3. tampon circulaire de 4 Mo en PSRAM, réservé à l'ouverture du fichier
+     *     (première image), après l'encodeur (sinon « No memory for reference frame »). */
+    log_memory("avant l'enregistrement");
+    esp_err_t err = nid_writer_create(0, &rc->writer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "tampon d'écriture : %s", esp_err_to_name(err));
+    }
+    bool h264_on = false;
+    if (err == ESP_OK) {
+        err = m2m_start(s_cap.h264_fd);
+        h264_on = err == ESP_OK;
+    }
     if (err == ESP_OK) {
         err = cam_start();
     }
-    /* Écrivain asynchrone créé APRÈS l'encodeur : ses images de référence (≈ 3 Mo
-     * d'un seul bloc en 1080p) passent avant le tampon d'écriture dans la PSRAM.
-     * Créé avant, le tampon de 4 Mo fragmentait la PSRAM : « No memory for
-     * reference frame » au banc du 27/11. Le fichier n'est ouvert qu'à la
-     * première image, l'écrivain est donc prêt à temps. */
-    if (err == ESP_OK) {
-        err = nid_writer_create(0, &rc->writer);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "tampon d'écriture : %s", esp_err_to_name(err));
-        }
-    }
-    log_memory("encodeur, caméra et tampon d'écriture prêts");
+    log_memory("encodeur et caméra démarrés");
 
     const int64_t frame_us = 1000000LL / s_cap.fps;
     const int64_t limit_us = (int64_t)duration_ms * 1000;

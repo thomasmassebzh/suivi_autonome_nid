@@ -10,7 +10,7 @@
  * Les écritures sont regroupées dans un tampon de transfert en mémoire interne
  * alignée (DMA de la carte SD, transferts USB) : la place est libérée dans le
  * tampon circulaire dès la copie, et le support ne reçoit que des blocs de
- * 32 ko (ou ce qui est en attente avant un déplacement, une fermeture, ou après
+ * 16 ko (ou ce qui est en attente avant un déplacement, une fermeture, ou après
  * FLUSH_IDLE_MS sans nouvelle donnée). Le multiplexeur MP4 n'a donc plus besoin
  * de son propre cache en mémoire interne (32 ko qui manquaient au banc).
  *
@@ -44,8 +44,8 @@
 static const char *TAG = "nid_writer";
 
 #define OP_QUEUE_LEN        1024            /* file en PSRAM : sans multiplexeur caché, une écriture par paquet */
-#define BOUNCE_SIZE         (32 * 1024)     /* tampon de transfert, mémoire interne alignée */
-#define BOUNCE_SIZE_MIN     (8 * 1024)
+#define BOUNCE_SIZE         (16 * 1024)     /* tampon de transfert, mémoire interne DMA alignée */
+#define BOUNCE_SIZE_MIN     (4 * 1024)
 #define FLUSH_IDLE_MS       50              /* données en attente écrites après ce délai sans nouvelle donnée */
 #define BOUNCE_ALIGN        64
 #define MAX_CHUNK           (64 * 1024)     /* morceau maximal copié d'un coup dans le tampon */
@@ -72,6 +72,7 @@ typedef struct {
 struct nid_writer {
     uint8_t          *ring;
     size_t            cap;
+    size_t            want;         /* taille demandée du tampon circulaire (alloué à l'ouverture) */
     size_t            head;         /* producteur seulement */
     size_t            tail;         /* consommateur seulement */
     size_t            used;         /* sous mux */
@@ -264,37 +265,25 @@ esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out)
         return ESP_ERR_NO_MEM;
     }
     portMUX_INITIALIZE(&w->mux);
+    w->want = buffer_bytes;
 
-    w->ring = heap_caps_malloc(buffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    /* PSRAM fragmentée : tampon réduit par moitiés jusqu'à 512 ko. */
-    while (w->ring == NULL && buffer_bytes > 512u * 1024u) {
-        buffer_bytes /= 2;
-        w->ring = heap_caps_malloc(buffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (w->ring != NULL) {
-            ESP_LOGW(TAG, "PSRAM fragmentée : tampon d'écriture réduit à %u ko", (unsigned)(buffer_bytes / 1024));
-        }
-    }
-    if (w->ring == NULL) {
-        buffer_bytes = FALLBACK_RING_SIZE;
-        w->ring = heap_caps_malloc(buffer_bytes, MALLOC_CAP_8BIT);
-        if (w->ring != NULL) {
-            ESP_LOGW(TAG, "PSRAM insuffisante : tampon réduit à %u ko", (unsigned)(buffer_bytes / 1024));
-        }
-    }
-    w->cap = buffer_bytes;
-    w->bounce_size = BOUNCE_SIZE;
-    w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, w->bounce_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    if (w->bounce == NULL) {
-        w->bounce_size = BOUNCE_SIZE_MIN;
-        w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, w->bounce_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    /* Tampon de transfert en mémoire interne capable de DMA : le pilote SD (ou USB)
+     * écrit directement depuis lui. En PSRAM, le pilote SD alloue à chaque écriture
+     * une copie en mémoire interne, qui manquait au banc une fois l'encodeur H.264
+     * démarré (« allocate_dma_buf: not enough mem »). À créer AVANT l'encodeur ;
+     * le grand tampon circulaire en PSRAM n'est réservé qu'à l'ouverture du
+     * fichier, APRÈS l'encodeur (ses images de référence d'abord). */
+    for (size_t sz = BOUNCE_SIZE; sz >= BOUNCE_SIZE_MIN && w->bounce == NULL; sz /= 2) {
+        w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        w->bounce_size = sz;
     }
     if (w->bounce == NULL) {
-        /* Mémoire interne épuisée : tampon de transfert en PSRAM (le pilote SD recopie, plus lent). */
-        w->bounce_size = BOUNCE_SIZE;
-        w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, w->bounce_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (w->bounce != NULL) {
-            ESP_LOGW(TAG, "mémoire interne insuffisante : tampon de transfert en PSRAM");
-        }
+        ESP_LOGE(TAG, "mémoire interne (DMA) insuffisante pour le tampon de transfert");
+        free(w);
+        return ESP_ERR_NO_MEM;
+    }
+    if (w->bounce_size < BOUNCE_SIZE) {
+        ESP_LOGW(TAG, "tampon de transfert réduit à %u ko (mémoire interne)", (unsigned)(w->bounce_size / 1024));
     }
     /* File d'opérations en PSRAM : 16 ko qui manqueraient en mémoire interne. */
     w->ops = xQueueCreateWithCaps(OP_QUEUE_LEN, sizeof(op_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -303,7 +292,7 @@ esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out)
     }
     w->space = xSemaphoreCreateBinary();
     w->done = xSemaphoreCreateBinary();
-    if (w->ring == NULL || w->bounce == NULL || w->ops == NULL || w->space == NULL || w->done == NULL) {
+    if (w->bounce == NULL || w->ops == NULL || w->space == NULL || w->done == NULL) {
         free_writer(w);
         return ESP_ERR_NO_MEM;
     }
@@ -335,10 +324,42 @@ static esp_err_t run_sync(nid_writer_t *w, uint8_t type, uint32_t timeout_ms)
     return w->result;
 }
 
+/** Tampon circulaire en PSRAM, réduit par moitiés si la PSRAM est fragmentée. */
+static esp_err_t alloc_ring(nid_writer_t *w)
+{
+    if (w->ring != NULL) {
+        return ESP_OK;
+    }
+    size_t sz = w->want;
+    w->ring = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    while (w->ring == NULL && sz > 512u * 1024u) {
+        sz /= 2;
+        w->ring = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (w->ring == NULL) {
+        sz = FALLBACK_RING_SIZE;
+        w->ring = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+    }
+    if (w->ring == NULL) {
+        ESP_LOGE(TAG, "tampon d'écriture : mémoire insuffisante");
+        return ESP_ERR_NO_MEM;
+    }
+    if (sz < w->want) {
+        ESP_LOGW(TAG, "tampon d'écriture réduit à %u ko (mémoire fragmentée)", (unsigned)(sz / 1024));
+    }
+    w->cap = sz;
+    return ESP_OK;
+}
+
 esp_err_t nid_writer_open(nid_writer_t *w, const char *path)
 {
     if (w == NULL || path == NULL || strlen(path) >= sizeof(w->path)) {
         return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t aerr = alloc_ring(w);
+    if (aerr != ESP_OK) {
+        w->error = true;
+        return aerr;
     }
     strlcpy(w->path, path, sizeof(w->path));
     w->head = w->tail = 0;
@@ -355,7 +376,7 @@ esp_err_t nid_writer_open(nid_writer_t *w, const char *path)
 
 int nid_writer_write(nid_writer_t *w, const void *data, size_t len)
 {
-    if (w == NULL || w->error) {
+    if (w == NULL || w->error || w->ring == NULL) {
         return -1;
     }
     const uint8_t *p = (const uint8_t *)data;
