@@ -9,9 +9,12 @@
  * matériel (esp_driver_jpeg, partagé avec esp_video sous son verrou) dans l'un
  * des deux tampons JPEG → tâche « banc_vue_flux » : envoi multipart.
  *
- * Cadence : CONFIG_BANC_WEB_VUE_IPS hors enregistrement, réduite à
- * CONFIG_BANC_WEB_VUE_ENREG_IPS pendant un enregistrement (0 : aucune image),
- * comme l'écran, pour ne pas faire perdre d'images à la vidéo.
+ * Cadence : CONFIG_BANC_WEB_VUE_IPS hors enregistrement. AUCUNE image pendant
+ * un enregistrement : l'encodeur JPEG matériel utilisé en même temps que
+ * l'encodeur H.264 corrompt les images de référence de ce dernier (essai au
+ * banc du 27/11 : vidéos lisibles mais roses, images P de 100 ko au lieu de
+ * 35, uniquement avec la vue web ouverte ; propres sans Wi-Fi ou vue fermée).
+ * La page garde la dernière image et le flux reste ouvert jusqu'à la fin.
  *
  * Tampons JPEG protégés (défaut 25 de docs/revue_cdcf.md) : l'image en cours
  * d'envoi (« envoi ») n'est jamais réécrite ; l'encodeur écrit dans l'autre,
@@ -74,6 +77,7 @@ static struct {
     TaskHandle_t          enc;
     SemaphoreHandle_t     nouvelle;     /*!< une image JPEG est prête */
     atomic_bool           client;       /*!< une page regarde */
+    atomic_bool           enreg;        /*!< enregistrement en cours : ni PPA ni JPEG */
     /* Session (sous verrou) */
     SemaphoreHandle_t     verrou;
     TaskHandle_t          flux;
@@ -102,10 +106,11 @@ void banc_web_image(const nid_capture_frame_t *f)
     if (!s_v.pret || !atomic_load(&s_v.client) || f == NULL || f->data == NULL || f->width < 32 || f->height < 32) {
         return;
     }
-    const int ips = f->recording ? CONFIG_BANC_WEB_VUE_ENREG_IPS : CONFIG_BANC_WEB_VUE_IPS;
-    if (ips <= 0) {
-        return;
+    atomic_store(&s_v.enreg, f->recording);
+    if (f->recording) {
+        return;     /* jamais pendant l'encodage H.264 (voir l'en-tête) */
     }
+    const int ips = CONFIG_BANC_WEB_VUE_IPS;
     const int64_t now = esp_timer_get_time();
     if (now - s_v.t_image_us < 1000000LL / ips || atomic_load(&s_v.rgb_plein)) {
         return;     /* cadence atteinte, ou image précédente pas encore encodée : image sautée */
@@ -181,6 +186,10 @@ static void tache_encodage(void *arg)
         if (!atomic_load(&s_v.rgb_plein)) {
             continue;
         }
+        if (atomic_load(&s_v.enreg) || banc_enregistrement_en_cours()) {
+            atomic_store(&s_v.rgb_plein, false);    /* image d'avant l'enregistrement : abandonnée */
+            continue;
+        }
         /* Tampon de sortie : jamais celui en cours d'envoi. */
         portENTER_CRITICAL(&s_mux);
         const int i = (s_v.envoi == 0) ? 1 : (s_v.envoi == 1) ? 0 : (s_v.dernier == 0 ? 1 : 0);
@@ -244,6 +253,9 @@ static void session(httpd_req_t *req)
 
     while (vivant && !nouvelle_demande()) {
         if (xSemaphoreTake(s_v.nouvelle, pdMS_TO_TICKS(ATTENTE_IMAGE_MS)) != pdTRUE) {
+            if (atomic_load(&s_v.enreg) || banc_enregistrement_en_cours()) {
+                derniere = esp_timer_get_time();    /* pas d'image pendant un enregistrement : normal */
+            }
             if (esp_timer_get_time() - derniere > FLUX_SANS_IMAGE_US) {
                 ESP_LOGW(TAG, "vue web : aucune image depuis %lld s (caméra ?), flux terminé",
                          (long long)(FLUX_SANS_IMAGE_US / 1000000LL));
@@ -423,8 +435,8 @@ esp_err_t banc_vue_init(void)
         return ESP_ERR_NO_MEM;
     }
     s_v.pret = true;
-    ESP_LOGI(TAG, "vue web prête : %" PRIu32 " px de large, %d i/s (%d pendant un enregistrement), qualité %d", l,
-             CONFIG_BANC_WEB_VUE_IPS, CONFIG_BANC_WEB_VUE_ENREG_IPS, CONFIG_BANC_WEB_VUE_QUALITE);
+    ESP_LOGI(TAG, "vue web prête : %" PRIu32 " px de large, %d i/s (aucune pendant un enregistrement), qualité %d",
+             l, CONFIG_BANC_WEB_VUE_IPS, CONFIG_BANC_WEB_VUE_QUALITE);
     return ESP_OK;
 }
 

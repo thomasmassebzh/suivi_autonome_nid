@@ -200,8 +200,8 @@ vue caméra, boutons) et y ajoute les fichiers de la carte SD et une console.
 5. **Sur la page** :
    - bandeau du haut : heure du banc, « en ligne » (état relu chaque seconde), ligne d'état de l'écran
      (prêt / REC / erreur, mêmes couleurs) et ses lignes de détail ;
-   - **Vue caméra** : « Afficher la vue » (8 i/s hors enregistrement, 2 i/s pendant un enregistrement,
-     les autres images sont sautées sans ralentir la vidéo) ; une seule vue à la fois : un second
+   - **Vue caméra** : « Afficher la vue » (8 i/s ; figée pendant un enregistrement : l'encodeur
+     JPEG de la vue, utilisé en même temps que l'encodeur H.264, rendait la vidéo rose) ; une seule vue à la fois : un second
      appareil reçoit « vue déjà ouverte », le même appareil (page rechargée) la reprend ;
    - **Actions** : ARMER / DÉSARMER, VIDÉO (durée réglable) / STOP, PHOTO, NUIT / JOUR / AUTO, LED IR
      en %, IR-cut, monochrome ; elles passent par les commandes de la console, donc par la même file
@@ -356,7 +356,7 @@ Comme le firmware, avec les identifiants `BANC` / `N00` :
 | Wi-Fi (sous-menu « Wi-Fi et tableau de bord web ») : mode | point d'accès |
 | Point d'accès : SSID / mot de passe / canal / appareils | `BANC-NID` / `banc-nid-essai` / 6 / 3 |
 | Station : SSID / mot de passe / attente / repli sur le point d'accès | vides (console `wifi sta`) / 20 s / oui |
-| Vue de la page : largeur / qualité JPEG / i/s / i/s pendant un enregistrement | 640 px / 50 / 8 / 2 |
+| Vue de la page : largeur / qualité JPEG / i/s (aucune pendant un enregistrement) | 640 px / 50 / 8 |
 | Suppression des fichiers depuis la page | oui |
 
 Les broches de la carte (PIR, I2C, I2S, SD, LED IR, IR-cut, batterie...) sont dans le menu du firmware
@@ -384,7 +384,7 @@ USB Serial/JTAG.
 | Réseau BANC-NID absent, fonction `wifi` « en défaut » | section « Si le Wi-Fi ne démarre pas » : `wifi`, lignes `nid_wifi` du journal, version du firmware du C6 |
 | Page « hors ligne » | appareil encore connecté à BANC-NID ? (le téléphone peut basculer sur la 4G : désactiver les données mobiles) ; `wifi` : état du lien |
 | Vue « déjà ouverte » | une seule vue à la fois : la fermer sur l'autre appareil (ou recharger la page sur le même) |
-| `perdues` > 0 seulement avec la vue web ouverte | réduire « i/s pendant un enregistrement » (menu Wi-Fi) à 1 ou 0 |
+| Vidéo rose ou pleine de blocs, débit bien au-dessus du réglage | firmware antérieur au 27/11 avec la vue web ouverte : mettre à jour (vue figée pendant l'enregistrement) |
 
 Pour signaler un problème : joindre le journal complet du moniteur depuis le démarrage, une photo de
 l'écran, les lignes `BILAN` et, pour une vidéo, la sortie de `ffprobe -show_streams`.
