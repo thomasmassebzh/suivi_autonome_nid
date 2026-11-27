@@ -40,18 +40,21 @@ typedef struct {
 } nid_writer_stats_t;
 
 /**
- * Crée un écrivain : tampon de transfert de 16 ko en mémoire interne DMA et
- * tâche d'écriture. Le tampon circulaire de buffer_bytes octets (PSRAM) n'est
- * réservé qu'à nid_writer_open(). buffer_bytes = 0 : taille de menuconfig
- * (CONFIG_NID_WRITER_BUFFER_KB).
+ * Crée un écrivain (tâche d'écriture, file d'opérations en PSRAM). Les tampons
+ * (circulaire de buffer_bytes octets et de transfert de 64 ko, en PSRAM) ne
+ * sont réservés qu'à nid_writer_open(). buffer_bytes = 0 : taille de
+ * menuconfig (CONFIG_NID_WRITER_BUFFER_KB).
  *
- * Ordre conseillé avec l'encodeur H.264 : créer l'écrivain avant de démarrer
- * l'encodeur (mémoire interne), ouvrir le fichier après (PSRAM).
+ * Ordre conseillé avec l'encodeur H.264 : démarrer l'encodeur (images de
+ * référence en PSRAM), puis ouvrir le fichier.
  */
 esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out);
 
 /** Ouvre (crée ou tronque) le fichier, de façon synchrone. */
 esp_err_t nid_writer_open(nid_writer_t *w, const char *path);
+
+/** Chemin du fichier ouvert, NULL si aucun. */
+const char *nid_writer_path(const nid_writer_t *w);
 
 /**
  * Ajoute len octets à écrire. Retourne immédiatement si le tampon a la place ;

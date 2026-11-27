@@ -53,6 +53,12 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_API_ENCODING_UTF_8=y
 CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+# Tampons de FatFs en PSRAM alignée sur la ligne de cache (valeurs par défaut, figées) :
+# avec les écritures alignées de nid_writer, aucune copie DMA en mémoire interne.
+CONFIG_FATFS_USE_DYN_BUFFERS=y
+CONFIG_FATFS_PER_FILE_CACHE=y
+CONFIG_FATFS_ALLOC_PREFER_EXTRAM=y
+CONFIG_FATFS_ALLOC_PREFER_ALIGNED_WORK_BUFFERS=y
 # Points de montage VFS : la carte SD, la console, et un par périphérique
 # d'esp_video (caméra, ISP, encodeurs H.264 et JPEG : /dev/video0, 10, 11...).
 # Avec 8 (défaut), « Failed to register video VFS dev name=video10 ».

@@ -120,7 +120,13 @@ static const char *TAG = "nid_capture";
 #define H264_MAX_QP             40
 #define H264_SPEC_MAX           256         /* SPS + PPS avec codes de début */
 
+#if CONFIG_NID_WRITER_ENABLE
+#define WRITE_MODE_STR          "asynchrone"
 #define MUXER_CACHE_SIZE        0           /* pas de cache dans le multiplexeur : nid_writer regroupe les écritures */
+#else
+#define WRITE_MODE_STR          "directe"
+#define MUXER_CACHE_SIZE        (32 * 1024) /* écriture directe (comme avant le 24/11) : cache du multiplexeur */
+#endif
 #define MP4_CLOSE_TIMEOUT_MS    30000       /* vidage du tampon d'écriture (jusqu'à 4 Mo) puis fsync */
 
 /* Identifiants des capteurs (ov5647.h, sc2336.h d'esp_cam_sensor) */
@@ -1344,14 +1350,19 @@ static bool h264_parse(const uint8_t *d, size_t len, uint8_t *spec, size_t spec_
     return idr;
 }
 
+#if CONFIG_NID_WRITER_ENABLE
 /*
  * Écriture du fichier MP4 par nid_writer : le multiplexeur dépose les données
  * dans un tampon en PSRAM, une tâche dédiée les écrit sur le support. La boucle
- * caméra n'attend plus la carte SD (ou la clé USB) ; ouverture et fermeture
- * (vidage du tampon, fflush, fsync) restent synchrones.
+ * caméra n'attend plus la carte SD (ou la clé USB). Le fichier est ouvert par
+ * record_locked() avant la caméra ; mp4_on_open ne fait que le retrouver.
  */
 static void *mp4_on_open(char *path)
 {
+    const char *open_path = nid_writer_path(s_rec.writer);
+    if (open_path != NULL && strcmp(open_path, path) == 0) {
+        return s_rec.writer;
+    }
     if (s_rec.writer == NULL || nid_writer_open(s_rec.writer, path) != ESP_OK) {
         ESP_LOGE(TAG, "création de %s impossible", path);
         s_rec.write_error = true;
@@ -1392,6 +1403,62 @@ static int mp4_on_close(void *writer)
     ESP_LOGE(TAG, "fermeture du MP4 : %s", esp_err_to_name(err));
     return -1;
 }
+#else
+/* Écriture directe (comme avant le 24/11) : fopen / fwrite / fseek, fflush + fsync avant fclose. */
+static void *mp4_on_open(char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "création de %s impossible (errno %d)", path, errno);
+        s_rec.write_error = true;
+    }
+    return f;
+}
+
+static int mp4_on_write(void *writer, void *buffer, int len)
+{
+    if (len <= 0) {
+        return 0;
+    }
+    size_t n = fwrite(buffer, 1, (size_t)len, (FILE *)writer);
+    if (n != (size_t)len) {
+        s_rec.write_error = true;
+        return -1;
+    }
+    return len;
+}
+
+static int mp4_on_seek(void *writer, uint64_t pos)
+{
+    if (pos > (uint64_t)INT32_MAX || fseek((FILE *)writer, (long)pos, SEEK_SET) != 0) {
+        s_rec.write_error = true;
+        return -1;
+    }
+    return 0;
+}
+
+static int mp4_on_close(void *writer)
+{
+    FILE *f = (FILE *)writer;
+    int ret = 0;
+    if (fflush(f) != 0) {
+        ret = -1;
+    }
+    if (fsync(fileno(f)) != 0) {
+        ret = -1;
+    }
+    if (fclose(f) != 0) {
+        ret = -1;
+    }
+    if (ret == 0) {
+        s_rec.closed_ok = true;
+    } else {
+        s_rec.write_error = true;
+        ESP_LOGE(TAG, "fermeture du MP4 : erreur (errno %d)", errno);
+    }
+    return ret;
+}
+#endif
 
 static esp_muxer_file_writer_t s_mp4_writer = {
     .on_open = mp4_on_open,
@@ -1480,6 +1547,20 @@ static esp_err_t rec_add_streams(rec_t *rc, const uint8_t *frame, size_t len)
     return ESP_OK;
 }
 
+/** Cumul d'une durée mesurée (µs) : somme et maximum. */
+typedef struct {
+    int64_t sum;
+    int64_t max;
+} loop_acc_t;
+
+static inline void loop_acc(loop_acc_t *a, int64_t v)
+{
+    a->sum += v;
+    if (v > a->max) {
+        a->max = v;
+    }
+}
+
 /** Mémoire libre (diagnostic des échecs d'allocation) : totale et plus grand bloc. */
 static void log_memory(const char *when)
 {
@@ -1537,27 +1618,37 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         ESP_LOGW(TAG, "son demandé mais indisponible : vidéo seule");
     }
 
-    /* Mémoire, dans cet ordre (banc du 27/11) :
-     *  1. écrivain asynchrone : son tampon de transfert de 16 ko en mémoire interne
-     *     DMA, avant que l'encodeur et la caméra ne la prennent presque toute
-     *     (sinon « allocate_dma_buf: not enough mem » du pilote SD) ;
+    /* Ordre (banc du 27/11) :
+     *  1. écrivain : tâche et file d'opérations seulement (aucun tampon) ;
      *  2. encodeur H.264 : images de référence (≈ 3 Mo d'un bloc en PSRAM) ;
-     *  3. tampon circulaire de 4 Mo en PSRAM, réservé à l'ouverture du fichier
-     *     (première image), après l'encodeur (sinon « No memory for reference frame »). */
+     *  3. ouverture du fichier : tampons de l'écrivain en PSRAM (après l'encodeur,
+     *     sinon « No memory for reference frame »), fopen hors de la boucle caméra ;
+     *  4. caméra. */
     log_memory("avant l'enregistrement");
-    esp_err_t err = nid_writer_create(0, &rc->writer);
+    esp_err_t err = ESP_OK;
+#if CONFIG_NID_WRITER_ENABLE
+    err = nid_writer_create(0, &rc->writer);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "tampon d'écriture : %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "écrivain : %s", esp_err_to_name(err));
     }
+#endif
     bool h264_on = false;
     if (err == ESP_OK) {
         err = m2m_start(s_cap.h264_fd);
         h264_on = err == ESP_OK;
     }
+#if CONFIG_NID_WRITER_ENABLE
+    if (err == ESP_OK) {
+        err = nid_writer_open(rc->writer, path);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ouverture de %s : %s", path, esp_err_to_name(err));
+        }
+    }
+#endif
     if (err == ESP_OK) {
         err = cam_start();
     }
-    log_memory("encodeur et caméra démarrés");
+    log_memory("encodeur, fichier et caméra prêts");
 
     const int64_t frame_us = 1000000LL / s_cap.fps;
     const int64_t limit_us = (int64_t)duration_ms * 1000;
@@ -1571,6 +1662,9 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     uint32_t last_pts = 0;
     int skip = SKIP_STARTUP_FRAME_COUNT;
     bool stalled = false;
+    /* Mesure des étapes de la boucle (moyenne / maximum) : où passe le temps d'une image. */
+    loop_acc_t a_wait = { 0 }, a_ov = { 0 }, a_enc = { 0 }, a_hook = { 0 }, a_mux = { 0 };
+    uint32_t n_loop = 0, n_fresh = 0;
 
     while (err == ESP_OK) {
         int64_t now = esp_timer_get_time();
@@ -1598,6 +1692,11 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         int64_t t = esp_timer_get_time();
         /* Image fraîche si DQBUF l'a attendue ; sinon elle attendait déjà dans la file. */
         const bool fresh = nid_capture_frame_is_fresh(t - t_call, frame_us);
+        if (skip == 0) {
+            loop_acc(&a_wait, t - t_call);
+            n_fresh += fresh ? 1u : 0u;
+            n_loop++;
+        }
         /* Remise du tampon de l'image k - CAM_BUF_COUNT : l'image k est capturée après. */
         const bool have_release = n_qbuf >= CAM_BUF_COUNT;
         const int64_t release_us = have_release ? qbuf_us[n_qbuf % CAM_BUF_COUNT] : 0;
@@ -1611,12 +1710,18 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
 
         /* Incrustation (obligatoire) puis encodage H.264 */
         uint8_t *frame = s_cap.cam_buf[cb.index];
+        const int64_t t_ov = esp_timer_get_time();
         overlay_apply(&s_cap.ov_video, frame);
+        const int64_t t_enc = esp_timer_get_time();
+        loop_acc(&a_ov, t_enc - t_ov);
         uint32_t enc_len = 0;
         err = m2m_encode(s_cap.h264_fd, frame, cb.bytesused, &enc_len);
+        const int64_t t_hook = esp_timer_get_time();
+        loop_acc(&a_enc, t_hook - t_enc);
         if (err == ESP_OK) {
             frame_hook(frame, cb.bytesused, s_cap.width, s_cap.height, false, true);
         }
+        loop_acc(&a_hook, esp_timer_get_time() - t_hook);
         cam_qbuf(cb.index);
         qbuf_us[n_qbuf++ % CAM_BUF_COUNT] = esp_timer_get_time();
         if (err != ESP_OK) {
@@ -1654,11 +1759,13 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
             .dts = pts,
             .key_frame = h264_parse(s_cap.h264_buf, enc_len, NULL, 0, NULL),
         };
+        const int64_t t_mux = esp_timer_get_time();
         xSemaphoreTake(s_mux_lock, portMAX_DELAY);
         esp_muxer_err_t me = esp_muxer_add_video_packet(rc->muxer, rc->video_idx, &pkt);
         xSemaphoreGive(s_mux_lock);
+        loop_acc(&a_mux, esp_timer_get_time() - t_mux);
         m2m_requeue(s_cap.h264_fd);
-        if (me != ESP_MUXER_ERR_OK || rc->write_error || nid_writer_failed(rc->writer)) {
+        if (me != ESP_MUXER_ERR_OK || rc->write_error || (rc->writer != NULL && nid_writer_failed(rc->writer))) {
             ESP_LOGE(TAG, "écriture de la vidéo impossible (%d) : support plein, retiré ou trop lent ?", (int)me);
             err = ESP_FAIL;
             break;
@@ -1703,8 +1810,19 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     ESP_LOGI(TAG, "vidéo %s : %" PRIu32 " images (%" PRIu32 " perdues), %" PRIu32 " trames son, %" PRIu32 " ms, %" PRIu64 " octets, %lld ms",
              path, st->video_frames, st->dropped_frames, st->audio_frames, st->duration_ms, st->bytes,
              (long long)((esp_timer_get_time() - t_begin) / 1000));
-    ESP_LOGI(TAG, "écriture : tampon max %" PRIu32 " ko sur %u ko, attente %" PRIu32 " ms, écriture la plus lente %" PRIu32 " ms",
-             st->write_peak_kb, (unsigned)(ws.buffer_bytes / 1024u), st->write_stall_ms, st->write_slowest_ms);
+    const uint32_t nl = n_loop ? n_loop : 1u;
+    ESP_LOGI(TAG, "boucle (moy/max ms) : attente caméra %lld/%lld, incrustation %lld/%lld, encodage %lld/%lld, "
+             "écran/aperçu %lld/%lld, multiplexeur %lld/%lld ; images fraîches %" PRIu32 "/%" PRIu32,
+             (long long)(a_wait.sum / 1000 / nl), (long long)(a_wait.max / 1000),
+             (long long)(a_ov.sum / 1000 / nl), (long long)(a_ov.max / 1000),
+             (long long)(a_enc.sum / 1000 / nl), (long long)(a_enc.max / 1000),
+             (long long)(a_hook.sum / 1000 / nl), (long long)(a_hook.max / 1000),
+             (long long)(a_mux.sum / 1000 / nl), (long long)(a_mux.max / 1000), n_fresh, n_loop);
+    ESP_LOGI(TAG, "écriture (%s) : tampon max %" PRIu32 " ko sur %u ko, attente %" PRIu32 " ms, écriture la plus lente %" PRIu32 " ms",
+             WRITE_MODE_STR, st->write_peak_kb, (unsigned)(ws.buffer_bytes / 1024u),
+             st->write_stall_ms, st->write_slowest_ms);
+    ESP_LOGI(TAG, "mémoire interne DMA minimale depuis le démarrage : %u ko",
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA) / 1024));
     if (rc->with_audio && st->audio_frames == 0) {
         ESP_LOGW(TAG, "aucune trame son dans le fichier (%" PRIu32 " refusée(s)) : vérifier le micro (vumètre du banc)",
                  st->audio_refused);
@@ -1715,6 +1833,7 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     }
     if (!rc->streams_added) {
         ESP_LOGE(TAG, "aucune image enregistrée");
+        unlink(path);       /* fichier ouvert d'avance mais vide */
         return ESP_ERR_TIMEOUT;
     }
     if (ce != ESP_MUXER_ERR_OK || rc->write_error || !rc->closed_ok) {

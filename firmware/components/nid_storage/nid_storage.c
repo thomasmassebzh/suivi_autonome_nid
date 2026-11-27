@@ -92,6 +92,7 @@ static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static sdmmc_card_t *s_card;
 static sd_pwr_ctrl_handle_t s_pwr_handle;
+static void *s_sd_dma_buf;      /* tampon DMA fixe du pilote SD pour les accès non alignés (4 ko, permanent) */
 static volatile bool s_mounted;
 static nid_storage_medium_t s_medium = NID_STORAGE_MEDIUM_NONE;
 
@@ -292,6 +293,18 @@ __attribute__((unused)) static esp_err_t mount_card(void)
         .format_if_mount_failed = false,    /* jamais de formatage : la carte de l'utilisateur reste intacte */
         .max_files = MAX_FILES_OPEN,
     };
+    /* Filet de sécurité (banc du 27/11) : un accès non aligné sur la ligne de cache
+     * (journal, config.ini...) passe par ce tampon fixe réservé au premier montage,
+     * au lieu d'une allocation en mémoire interne à chaque écriture (allocate_dma_buf),
+     * qui échoue quand l'encodeur H.264, l'écran et le Wi-Fi ont pris la mémoire. */
+    if (s_sd_dma_buf == NULL) {
+        s_sd_dma_buf = heap_caps_aligned_calloc(64, 1, 4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        if (s_sd_dma_buf != NULL && heap_caps_get_allocated_size(s_sd_dma_buf) % 64 != 0) {
+            heap_caps_free(s_sd_dma_buf);       /* le pilote prend la taille allouée comme longueur de DMA */
+            s_sd_dma_buf = NULL;
+        }
+    }
+    host.dma_aligned_buffer = s_sd_dma_buf;
     const esp_err_t err = esp_vfs_fat_sdmmc_mount(NID_SD_MOUNT_POINT, &host, &slot, &mount_cfg, &s_card);
     if (err != ESP_OK) {
         if (err == ESP_FAIL) {
