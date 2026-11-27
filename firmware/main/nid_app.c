@@ -828,7 +828,9 @@ void nid_app_run(void)
     /* 4. Cause du démarrage. */
     nid_boot_info_t boot;
     nid_power_get_boot_info(&boot);
-    ESP_LOGI(TAG, "firmware %s, démarrage n°%" PRIu32 " : %s", fw_version(), st->boot_count, nid_power_wake_str(boot.reason));
+    ESP_LOGI(TAG, "VERSION firmware %s (compilé le %s à %s), démarrage n°%" PRIu32 " : %s", fw_version(),
+             esp_app_get_description()->date, esp_app_get_description()->time, st->boot_count,
+             nid_power_wake_str(boot.reason));
 
     switch (boot.reason) {
     case NID_WAKE_PIR:

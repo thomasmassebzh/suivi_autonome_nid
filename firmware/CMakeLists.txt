@@ -6,8 +6,9 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-# Version du firmware : reprise dans le journal, la page d'installation et les métadonnées.
-set(PROJECT_VER "0.1.0")
+# Version du firmware (« 0.2.0-<commit> ») : reprise au démarrage, dans le journal,
+# la page d'installation et les métadonnées. Voir version.cmake.
+include(${CMAKE_CURRENT_LIST_DIR}/version.cmake)
 
 # esp_audio_codec selon la révision de la puce (composant nid_codec_audio).
 include(${CMAKE_CURRENT_LIST_DIR}/codec_audio/codec_audio.cmake)

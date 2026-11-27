@@ -266,6 +266,14 @@ esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out)
     portMUX_INITIALIZE(&w->mux);
 
     w->ring = heap_caps_malloc(buffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* PSRAM fragmentée : tampon réduit par moitiés jusqu'à 512 ko. */
+    while (w->ring == NULL && buffer_bytes > 512u * 1024u) {
+        buffer_bytes /= 2;
+        w->ring = heap_caps_malloc(buffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (w->ring != NULL) {
+            ESP_LOGW(TAG, "PSRAM fragmentée : tampon d'écriture réduit à %u ko", (unsigned)(buffer_bytes / 1024));
+        }
+    }
     if (w->ring == NULL) {
         buffer_bytes = FALLBACK_RING_SIZE;
         w->ring = heap_caps_malloc(buffer_bytes, MALLOC_CAP_8BIT);
