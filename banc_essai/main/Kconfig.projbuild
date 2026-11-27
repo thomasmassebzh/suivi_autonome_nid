@@ -159,15 +159,6 @@ menu "Banc d'essai"
             range 1 12
             default 8
 
-        config BANC_WEB_VUE_ENREG_IPS
-            int "Vue caméra de la page : images par seconde pendant un enregistrement (0 = aucune)"
-            range 0 5
-            default 2
-            help
-                Comme la vue de l'écran : quelques images par seconde seulement, les
-                autres sont sautées sans attendre, pour ne pas faire perdre d'images
-                à la vidéo. Comparer « perdues » dans le bilan avec 0.
-
         config BANC_WEB_SUPPRESSION
             bool "Page web : suppression des fichiers de la carte SD"
             default y
