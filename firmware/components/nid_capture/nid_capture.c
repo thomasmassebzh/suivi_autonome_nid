@@ -120,7 +120,7 @@ static const char *TAG = "nid_capture";
 #define H264_MAX_QP             40
 #define H264_SPEC_MAX           256         /* SPS + PPS avec codes de début */
 
-#define MUXER_CACHE_SIZE        (32 * 1024)
+#define MUXER_CACHE_SIZE        0           /* pas de cache dans le multiplexeur : nid_writer regroupe les écritures */
 #define MP4_CLOSE_TIMEOUT_MS    30000       /* vidage du tampon d'écriture (jusqu'à 4 Mo) puis fsync */
 
 /* Identifiants des capteurs (ov5647.h, sc2336.h d'esp_cam_sensor) */
@@ -1493,6 +1493,10 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
 
     /* Écrivain asynchrone : tampon en PSRAM vidé par une tâche dédiée. */
     ESP_RETURN_ON_ERROR(nid_writer_create(0, &rc->writer), TAG, "tampon d'écriture");
+    ESP_LOGI(TAG, "mémoire interne libre %u ko (bloc max %u ko), PSRAM libre %u ko",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
     /* Multiplexeur MP4 (configuration de l'exemple video_muxer, un seul segment) */
     mp4_muxer_config_t mp4_cfg;

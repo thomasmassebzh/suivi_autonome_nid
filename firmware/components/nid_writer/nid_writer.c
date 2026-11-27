@@ -7,9 +7,12 @@
  *   nid_writer_open / nid_writer_close : opérations synchrones (attente du résultat)
  *
  * Consommateur (tâche « nid_ecriture ») : traite les opérations dans l'ordre.
- * Pour une écriture, il recopie un morceau du tampon circulaire (PSRAM) dans un
- * tampon de transfert en mémoire interne alignée (DMA de la carte SD, transferts
- * USB), libère aussitôt la place dans le tampon circulaire, puis écrit.
+ * Les écritures sont regroupées dans un tampon de transfert en mémoire interne
+ * alignée (DMA de la carte SD, transferts USB) : la place est libérée dans le
+ * tampon circulaire dès la copie, et le support ne reçoit que des blocs de
+ * 32 ko (ou ce qui est en attente avant un déplacement, une fermeture, ou après
+ * FLUSH_IDLE_MS sans nouvelle donnée). Le multiplexeur MP4 n'a donc plus besoin
+ * de son propre cache en mémoire interne (32 ko qui manquaient au banc).
  *
  * Comptabilité du tampon : `used` (octets en attente) n'est modifié que sous la
  * section critique `mux` ; `head` n'est touché que par le producteur, `tail`
@@ -30,6 +33,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -39,9 +43,10 @@
 
 static const char *TAG = "nid_writer";
 
-#define OP_QUEUE_LEN        512
+#define OP_QUEUE_LEN        1024            /* file en PSRAM : sans multiplexeur caché, une écriture par paquet */
 #define BOUNCE_SIZE         (32 * 1024)     /* tampon de transfert, mémoire interne alignée */
 #define BOUNCE_SIZE_MIN     (8 * 1024)
+#define FLUSH_IDLE_MS       50              /* données en attente écrites après ce délai sans nouvelle donnée */
 #define BOUNCE_ALIGN        64
 #define MAX_CHUNK           (64 * 1024)     /* morceau maximal copié d'un coup dans le tampon */
 #define FALLBACK_RING_SIZE  (256 * 1024)    /* sans PSRAM */
@@ -75,6 +80,7 @@ struct nid_writer {
 
     uint8_t          *bounce;
     size_t            bounce_size;
+    size_t            bounce_fill;  /* consommateur seulement : octets en attente d'écriture */
 
     QueueHandle_t     ops;
     SemaphoreHandle_t space;        /* donné par le consommateur après chaque libération */
@@ -104,30 +110,41 @@ static void set_error(nid_writer_t *w, const char *what)
     w->error = true;
 }
 
+/** Écrit sur le support ce qui attend dans le tampon de transfert. */
+static void flush_bounce(nid_writer_t *w)
+{
+    const size_t m = w->bounce_fill;
+    w->bounce_fill = 0;
+    if (m == 0 || w->error || w->f == NULL) {
+        return;     /* après une erreur : données consommées, plus écrites */
+    }
+    const int64_t t0 = esp_timer_get_time();
+    const size_t n = fwrite(w->bounce, 1, m, w->f);
+    const uint32_t dt_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+    if (dt_ms > w->slowest_ms) {
+        w->slowest_ms = dt_ms;
+    }
+    if (n != m) {
+        set_error(w, "écriture impossible (support plein ou retiré ?)");
+    } else {
+        w->bytes += m;
+    }
+}
+
 static void consume_write(nid_writer_t *w, size_t len)
 {
     while (len > 0) {
-        const size_t m = len < w->bounce_size ? len : w->bounce_size;
-        w->tail = nid_ring_copy_out(w->ring, w->cap, w->tail, w->bounce, m);
+        const size_t room = w->bounce_size - w->bounce_fill;
+        const size_t m = len < room ? len : room;
+        w->tail = nid_ring_copy_out(w->ring, w->cap, w->tail, w->bounce + w->bounce_fill, m);
         portENTER_CRITICAL(&w->mux);
         w->used -= m;
         portEXIT_CRITICAL(&w->mux);
         xSemaphoreGive(w->space);       /* place libérée : le producteur peut continuer */
+        w->bounce_fill += m;
         len -= m;
-
-        if (w->error || w->f == NULL) {
-            continue;                   /* après une erreur : données consommées, plus écrites */
-        }
-        const int64_t t0 = esp_timer_get_time();
-        const size_t n = fwrite(w->bounce, 1, m, w->f);
-        const uint32_t dt_ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
-        if (dt_ms > w->slowest_ms) {
-            w->slowest_ms = dt_ms;
-        }
-        if (n != m) {
-            set_error(w, "écriture impossible (support plein ou retiré ?)");
-        } else {
-            w->bytes += m;
+        if (w->bounce_fill == w->bounce_size) {
+            flush_bounce(w);
         }
     }
 }
@@ -159,8 +176,13 @@ static void writer_task(void *arg)
     nid_writer_t *w = (nid_writer_t *)arg;
     op_t op;
     for (;;) {
-        if (xQueueReceive(w->ops, &op, portMAX_DELAY) != pdTRUE) {
+        const TickType_t wait = w->bounce_fill > 0 ? pdMS_TO_TICKS(FLUSH_IDLE_MS) : portMAX_DELAY;
+        if (xQueueReceive(w->ops, &op, wait) != pdTRUE) {
+            flush_bounce(w);            /* plus rien n'arrive : ce qui attend part sur le support */
             continue;
+        }
+        if (op.type != OP_WRITE) {
+            flush_bounce(w);            /* l'ordre des écritures et des déplacements est conservé */
         }
         switch (op.type) {
         case OP_OPEN:
@@ -168,6 +190,7 @@ static void writer_task(void *arg)
                 fclose(w->f);
             }
             w->error = false;
+            w->bounce_fill = 0;
             w->f = fopen(w->path, "wb");
             if (w->f == NULL) {
                 set_error(w, "création impossible");
@@ -214,7 +237,7 @@ static void writer_task(void *arg)
 static void free_writer(nid_writer_t *w)
 {
     if (w->ops) {
-        vQueueDelete(w->ops);
+        vQueueDeleteWithCaps(w->ops);
     }
     if (w->space) {
         vSemaphoreDelete(w->space);
@@ -257,7 +280,19 @@ esp_err_t nid_writer_create(size_t buffer_bytes, nid_writer_t **out)
         w->bounce_size = BOUNCE_SIZE_MIN;
         w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, w->bounce_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     }
-    w->ops = xQueueCreate(OP_QUEUE_LEN, sizeof(op_t));
+    if (w->bounce == NULL) {
+        /* Mémoire interne épuisée : tampon de transfert en PSRAM (le pilote SD recopie, plus lent). */
+        w->bounce_size = BOUNCE_SIZE;
+        w->bounce = heap_caps_aligned_alloc(BOUNCE_ALIGN, w->bounce_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (w->bounce != NULL) {
+            ESP_LOGW(TAG, "mémoire interne insuffisante : tampon de transfert en PSRAM");
+        }
+    }
+    /* File d'opérations en PSRAM : 16 ko qui manqueraient en mémoire interne. */
+    w->ops = xQueueCreateWithCaps(OP_QUEUE_LEN, sizeof(op_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (w->ops == NULL) {
+        w->ops = xQueueCreateWithCaps(OP_QUEUE_LEN / 8, sizeof(op_t), MALLOC_CAP_8BIT);
+    }
     w->space = xSemaphoreCreateBinary();
     w->done = xSemaphoreCreateBinary();
     if (w->ring == NULL || w->bounce == NULL || w->ops == NULL || w->space == NULL || w->done == NULL) {
