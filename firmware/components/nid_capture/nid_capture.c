@@ -1480,6 +1480,16 @@ static esp_err_t rec_add_streams(rec_t *rc, const uint8_t *frame, size_t len)
     return ESP_OK;
 }
 
+/** Mémoire libre (diagnostic des échecs d'allocation) : totale et plus grand bloc. */
+static void log_memory(const char *when)
+{
+    ESP_LOGI(TAG, "mémoire (%s) : interne %u ko libres (bloc max %u ko), PSRAM %u ko libres (bloc max %u ko)", when,
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
+}
+
 static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_capture_stop_cb_t stop_cb, void *arg,
                                nid_capture_stats_t *st)
 {
@@ -1491,12 +1501,6 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
 
     ESP_RETURN_ON_ERROR(cam_configure(true), TAG, "caméra (vidéo)");
 
-    /* Écrivain asynchrone : tampon en PSRAM vidé par une tâche dédiée. */
-    ESP_RETURN_ON_ERROR(nid_writer_create(0, &rc->writer), TAG, "tampon d'écriture");
-    ESP_LOGI(TAG, "mémoire interne libre %u ko (bloc max %u ko), PSRAM libre %u ko",
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
     /* Multiplexeur MP4 (configuration de l'exemple video_muxer, un seul segment) */
     mp4_muxer_config_t mp4_cfg;
@@ -1510,15 +1514,11 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
     mp4_cfg.moov_before_mdat = false;
     esp_muxer_handle_t muxer = esp_muxer_open(&mp4_cfg.base_config, sizeof(mp4_cfg));
     if (muxer == NULL) {
-        nid_writer_destroy(rc->writer);
-        rc->writer = NULL;
         ESP_LOGE(TAG, "ouverture du multiplexeur MP4 impossible");
         return ESP_ERR_NO_MEM;
     }
     if (esp_muxer_set_file_writer(muxer, &s_mp4_writer) != ESP_MUXER_ERR_OK) {
         esp_muxer_close(muxer);
-        nid_writer_destroy(rc->writer);
-        rc->writer = NULL;
         ESP_LOGE(TAG, "écriture du MP4 : configuration refusée");
         return ESP_FAIL;
     }
@@ -1537,11 +1537,24 @@ static esp_err_t record_locked(const char *path, uint32_t duration_ms, nid_captu
         ESP_LOGW(TAG, "son demandé mais indisponible : vidéo seule");
     }
 
+    log_memory("avant l'encodeur");
     esp_err_t err = m2m_start(s_cap.h264_fd);
     bool h264_on = err == ESP_OK;
     if (err == ESP_OK) {
         err = cam_start();
     }
+    /* Écrivain asynchrone créé APRÈS l'encodeur : ses images de référence (≈ 3 Mo
+     * d'un seul bloc en 1080p) passent avant le tampon d'écriture dans la PSRAM.
+     * Créé avant, le tampon de 4 Mo fragmentait la PSRAM : « No memory for
+     * reference frame » au banc du 27/11. Le fichier n'est ouvert qu'à la
+     * première image, l'écrivain est donc prêt à temps. */
+    if (err == ESP_OK) {
+        err = nid_writer_create(0, &rc->writer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "tampon d'écriture : %s", esp_err_to_name(err));
+        }
+    }
+    log_memory("encodeur, caméra et tampon d'écriture prêts");
 
     const int64_t frame_us = 1000000LL / s_cap.fps;
     const int64_t limit_us = (int64_t)duration_ms * 1000;

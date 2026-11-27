@@ -866,6 +866,12 @@ esp_err_t nid_storage_media_commit(const nid_media_file_t *f)
  */
 static esp_err_t keep_as_incomplete(const char *tmp_path, const char *final_path)
 {
+    struct stat st;
+    if (stat(tmp_path, &st) != 0) {
+        /* Échec avant la création du fichier (encodeur, mémoire...) : rien à garder. */
+        ESP_LOGW(TAG, "%s n'a pas été créé : rien à renommer", tmp_path);
+        return ESP_OK;
+    }
     const char *slash = strrchr(final_path, '/');
     const char *dot = strrchr(final_path, '.');
     size_t stem_len = strlen(final_path);

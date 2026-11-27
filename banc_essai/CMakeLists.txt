@@ -10,7 +10,8 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-set(PROJECT_VER "0.1.0")
+# Version commune au firmware : « 0.2.0-<commit> » (firmware/version.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../firmware/version.cmake")
 
 # Composants du firmware utilisés par le banc (leurs propres dépendances
 # suivent par REQUIRES / PRIV_REQUIRES et par leurs idf_component.yml).

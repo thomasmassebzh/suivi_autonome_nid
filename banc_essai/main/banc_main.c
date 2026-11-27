@@ -744,7 +744,10 @@ void app_main(void)
     regler_heure_compilation();
 
     const esp_app_desc_t *app = esp_app_get_description();
-    ESP_LOGI(TAG, "Banc d'essai Suivi nid %s", app->version);
+    ESP_LOGI(TAG, "==================================================================");
+    ESP_LOGI(TAG, "  Banc d'essai Suivi nid — VERSION %s", app->version);
+    ESP_LOGI(TAG, "  compilé le %s à %s, ESP-IDF %s", app->date, app->time, app->idf_ver);
+    ESP_LOGI(TAG, "==================================================================");
 
     /* 1. Fonctions choisies au démarrage précédent (NVS). */
     banc_fonctions_charger();
@@ -905,6 +908,7 @@ void app_main(void)
             banc_f_defaut(BANC_F_WIFI, err);
         }
     }
+    ESP_LOGI(TAG, "VERSION %s", esp_app_get_description()->version);
     ESP_LOGI(TAG, "prêt : BOOT court = armer/désarmer, BOOT long = vidéo (GPIO%d) ; « help » pour les commandes",
              CONFIG_BANC_BOUTON_GPIO);
 }
